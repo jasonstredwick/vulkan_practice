@@ -1,0 +1,28 @@
+CC = cl.exe
+LINK = link
+GLSLC = glslc.exe
+CPPFLAGS = /std:c++latest /utf-8 /EHsc -I. -I.. -I..\..\third_party\vcpkg\installed\x64-windows-static\include -IC:\VulkanSDK\1.3.231.1\Include
+LDFLAGS = /SUBSYSTEM:CONSOLE /LIBPATH:C:\VulkanSDK\1.3.231.1\lib /LIBPATH:..\..\third_party\vcpkg\installed\x64-windows-static\lib
+LIBS = User32.lib Kernel32.lib Gdi32.lib Shell32.lib vulkan-1.lib glfw3.lib fmt.lib
+
+OBJS = main.obj
+EXES = a.exe
+SHDS = shader.frag.spv shader.vert.spv
+
+all: $(EXES)
+
+shader.frag.spv: shader.frag
+    $(GLSLC) shader.frag -o shader.frag.spv
+
+shader.vert.spv: shader.vert
+    $(GLSLC) shader.vert -o shader.vert.spv
+
+#.cpp.obj is a predefined rule ... includes /c so not needed in CPPFLAGS
+main.obj: main.cpp
+    $(CC) $(CPPFLAGS) /c main.cpp
+
+a.exe: $(OBJS) $(SHDS)
+    $(LINK) $(LDFLAGS) $(OBJS) -out:a.exe $(LIBS)
+
+clean:
+    del $(EXES) $(OBJS) $(SHDS)

@@ -1,0 +1,27 @@
+CC = g++-13
+LINK = g++-13
+GLSLC = glslc
+CPPFLAGS = -std=c++23 -I. -I..
+LDFLAGS =
+LIBS = -lvulkan -lglfw -lfmt
+
+OBJS = main.o
+EXES = a.exe
+SHDS = shader.frag.spv shader.vert.spv
+
+all: $(EXES)
+
+shader.frag.spv: shader.frag
+	$(GLSLC) shader.frag -o shader.frag.spv
+
+shader.vert.spv: shader.vert
+	$(GLSLC) shader.vert -o shader.vert.spv
+
+main.o: main.cpp
+	$(CC) $(CPPFLAGS) -c main.cpp
+
+a.exe: $(OBJS) $(SHDS)
+	$(LINK) $(LDFLAGS) $(OBJS) -o a.exe $(LIBS)
+
+clean:
+	rm $(EXES) $(OBJS) $(SHDS)
