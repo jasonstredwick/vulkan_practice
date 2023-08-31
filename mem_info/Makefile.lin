@@ -1,0 +1,21 @@
+CC = g++-13
+LINK = g++-13
+GLSLC = glslc
+CPPFLAGS = -std=c++23 -I. -I..
+LDFLAGS =
+LIBS = -lvulkan
+
+OBJS = main.o
+EXES = a.exe
+SHDS =
+
+all: $(EXES)
+
+main.o: main.cpp
+	$(CC) $(CPPFLAGS) -c main.cpp
+
+a.exe: $(OBJS) $(SHDS)
+	$(LINK) $(LDFLAGS) $(OBJS) -o a.exe $(LIBS)
+
+clean:
+	rm $(EXES) $(OBJS) $(SHDS)
