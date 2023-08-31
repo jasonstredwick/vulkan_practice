@@ -58,6 +58,14 @@ int main(int argc, char** argv) {
         };
         indices = {0, 2, 1};
 
+        // testing MemoryDevice re-allocation with std::pmr::vector
+        vertices.push_back({{0.5f, 0.5f, 0.0f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}});
+        vertices.push_back({{0.0f, 0.5f, 0.0f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}});
+        vertices.push_back({{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}});
+        indices.push_back(3);
+        indices.push_back(5);
+        indices.push_back(4);
+
         size_t vertex_buffer_size_in_bytes = sizeof(Vertex) * vertices.size();
         size_t indices_size_in_bytes = sizeof(uint32_t) * indices.size();
         vk::raii::Buffer vertex_buffer = allocator.AsBuffer(
