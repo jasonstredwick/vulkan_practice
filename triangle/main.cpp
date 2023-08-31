@@ -11,22 +11,19 @@
 #include <string>
 #include <vector>
 
-#include <fmt/core.h>
-
-#include "jms/vulkan/vulkan.hpp"
+#include "jms/utils/no_mutex.hpp"
 #include "jms/vulkan/camera.hpp"
 #include "jms/vulkan/commands.hpp"
 #include "jms/vulkan/render_info.hpp"
 #include "jms/vulkan/state.hpp"
 #include "jms/vulkan/vertex_description.hpp"
+#include "jms/vulkan/vulkan.hpp"
 #include "jms/wsi/glfw.hpp"
 #include "jms/wsi/glfw.cpp"
 
 #include "shader.hpp"
 
 
-constexpr const size_t DIM_X = 768;
-constexpr const size_t DIM_Y = 768;
 constexpr const size_t WIN_WIDTH = 1024;
 constexpr const size_t WIN_HEIGHT = 1024;
 
@@ -36,176 +33,53 @@ jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State&, jms::wsi::glfw::En
 
 
 int main(int argc, char** argv) {
-    std::cout << "start" << std::endl;
+    std::cout << std::format("Start\n");
 
     try {
-        std::vector<Vertex> vertices = {
-            {{0.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
-            {{0.5f, 0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
-            {{0.5f, 0.5f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}}
-        };
-        std::vector<uint32_t> indices = {0, 2, 1};
-        size_t vertex_buffer_size_in_bytes = sizeof(Vertex) * vertices.size();
-        size_t indices_size_in_bytes = sizeof(uint32_t) * indices.size();
-
         jms::vulkan::State vulkan_state{};
         jms::wsi::glfw::Environment glfw_environment{};
         jms::wsi::glfw::Window window = CreateEnvironment(vulkan_state, glfw_environment);
 
-        const vk::raii::PhysicalDevice& physical_device = vulkan_state.physical_devices.at(0);
-        const vk::raii::Device& device = vulkan_state.devices.at(0);
-        std::vector<uint32_t> optimal_indices = jms::vulkan::FindOptimalIndices(physical_device);
+        vk::raii::PhysicalDevice& physical_device = vulkan_state.physical_devices.at(0);
+        vk::raii::Device& device = vulkan_state.devices.at(0);
+        vk::AllocationCallbacks vk_allocation_callbacks{};
+        jms::vulkan::MemoryHelper memory_helper{physical_device, device, vk_allocation_callbacks};
+        uint32_t memory_type_index = memory_helper.GetHostVisibleDeviceMemoryResourceCapableMemoryType();
+        jms::vulkan::DeviceMemoryResource dmr = memory_helper.CreateDirectMemoryResource(memory_type_index);
+        auto allocator = memory_helper.CreateHostVisibleDeviceMemoryResource<std::pmr::vector, jms::NoMutex>(dmr);
 
-        /***
-         * VERTICES
-        */
-        vk::raii::Buffer buffer_vs = device.createBuffer({
-            .size=vertex_buffer_size_in_bytes,
-            .usage=vk::BufferUsageFlags(vk::BufferUsageFlagBits::eTransferSrc),
-            .sharingMode=vk::SharingMode::eExclusive
-        });
-        vk::MemoryRequirements mem_reqs_vs = buffer_vs.getMemoryRequirements();
-        vk::MemoryPropertyFlags prohibited_flags_vs = vk::MemoryPropertyFlagBits::eDeviceLocal;
-        std::vector<uint32_t> restricted_indices_vs = jms::vulkan::RestrictMemoryTypes(physical_device,
-                                                                                       optimal_indices,
-                                                                                       mem_reqs_vs.memoryTypeBits,
-                                                                                       prohibited_flags_vs);
-        if (restricted_indices_vs.empty()) { throw std::runtime_error("Failed to create vertex staging buffer ... no compatible memory type found."); }
-        vk::raii::DeviceMemory device_memory_vs = device.allocateMemory({
-            .allocationSize= mem_reqs_vs.size,
-            .memoryTypeIndex=restricted_indices_vs[0]
-        });
-        buffer_vs.bindMemory(*device_memory_vs, 0);
-        void* data_vs = device_memory_vs.mapMemory(0, vertex_buffer_size_in_bytes);
-        std::memcpy(data_vs, vertices.data(), vertex_buffer_size_in_bytes);
-        device_memory_vs.unmapMemory();
+        std::pmr::vector<Vertex> vertices{&allocator};
+        std::pmr::vector<uint32_t> indices{&allocator};
 
-        vk::raii::Buffer buffer_v = device.createBuffer({
-            .size=vertex_buffer_size_in_bytes,
-            .usage=vk::BufferUsageFlags(vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst),
-            .sharingMode=vk::SharingMode::eExclusive
-        });
-        vk::MemoryRequirements mem_reqs_v = buffer_v.getMemoryRequirements();
-        std::vector<uint32_t> restricted_indices_v = jms::vulkan::RestrictMemoryTypes(physical_device,
-                                                                                      optimal_indices,
-                                                                                      mem_reqs_v.memoryTypeBits,
-                                                                                      {});
-        if (restricted_indices_v.empty()) { throw std::runtime_error("Failed to create vertex buffer ... no compatible memory type found."); }
-        vk::raii::DeviceMemory device_memory_v = device.allocateMemory({
-            .allocationSize= mem_reqs_v.size,
-            .memoryTypeIndex=restricted_indices_v[0]
-        });
-        buffer_v.bindMemory(*device_memory_v, 0);
+        vertices = {
+            {{0.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{0.5f, 0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{0.5f, 0.5f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}}
+        };
+        indices = {0, 2, 1};
 
-        /***
-         * INDICES
-        */
-        vk::raii::Buffer buffer_is = device.createBuffer({
-            .size=indices_size_in_bytes,
-            .usage=vk::BufferUsageFlags(vk::BufferUsageFlagBits::eTransferSrc),
-            .sharingMode=vk::SharingMode::eExclusive
-        });
-        vk::MemoryRequirements mem_reqs_is = buffer_is.getMemoryRequirements();
-        vk::MemoryPropertyFlags prohibited_flags_is = vk::MemoryPropertyFlagBits::eDeviceLocal;
-        std::vector<uint32_t> restricted_indices_is = jms::vulkan::RestrictMemoryTypes(physical_device,
-                                                                                       optimal_indices,
-                                                                                       mem_reqs_is.memoryTypeBits,
-                                                                                       prohibited_flags_is);
-        if (restricted_indices_is.empty()) { throw std::runtime_error("Failed to create indices staging buffer ... no compatible memory type found."); }
-        vk::raii::DeviceMemory device_memory_is = device.allocateMemory({
-            .allocationSize= mem_reqs_is.size,
-            .memoryTypeIndex=restricted_indices_is[0]
-        });
-        buffer_is.bindMemory(*device_memory_is, 0);
-        void* data_is = device_memory_is.mapMemory(0, indices_size_in_bytes);
-        std::memcpy(data_is, indices.data(), indices_size_in_bytes);
-        device_memory_is.unmapMemory();
-
-        vk::raii::Buffer buffer_i = device.createBuffer({
-            .size=indices_size_in_bytes,
-            .usage=vk::BufferUsageFlags(vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eTransferDst),
-            .sharingMode=vk::SharingMode::eExclusive
-        });
-        vk::MemoryRequirements mem_reqs_i = buffer_i.getMemoryRequirements();
-        std::vector<uint32_t> restricted_indices_i = jms::vulkan::RestrictMemoryTypes(physical_device,
-                                                                                      optimal_indices,
-                                                                                      mem_reqs_i.memoryTypeBits,
-                                                                                      {});
-        if (restricted_indices_i.empty()) { throw std::runtime_error("Failed to create indices buffer ... no compatible memory type found."); }
-        vk::raii::DeviceMemory device_memory_i = device.allocateMemory({
-            .allocationSize= mem_reqs_i.size,
-            .memoryTypeIndex=restricted_indices_i[0]
-        });
-        buffer_i.bindMemory(*device_memory_i, 0);
-
-        /***
-         * COPY DATA TO GPU
-        */
-        {
-            std::vector<vk::raii::CommandBuffer> cbs = device.allocateCommandBuffers({
-                .commandPool=*(vulkan_state.command_pools.at(0)),
-                .level=vk::CommandBufferLevel::ePrimary,
-                .commandBufferCount=1
-            });
-            std::vector<vk::CommandBuffer> vk_cbs{};
-            std::ranges::transform(cbs, std::back_inserter(vk_cbs), [](auto& v) { return *v; });
-            vk::raii::CommandBuffer& cb = cbs.at(0);
-            cb.begin({.flags=vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
-            cb.copyBuffer(*buffer_vs, *buffer_v, {{
-                .srcOffset=0,
-                .dstOffset=0,
-                .size=vertex_buffer_size_in_bytes
-            }});
-            cb.copyBuffer(*buffer_is, *buffer_i, {{
-                .srcOffset=0,
-                .dstOffset=0,
-                .size=indices_size_in_bytes
-            }});
-            cb.end();
-            vulkan_state.graphics_queue.submit({{
-                .commandBufferCount=static_cast<uint32_t>(vk_cbs.size()),
-                .pCommandBuffers=vk_cbs.data()
-            }});
-            vulkan_state.graphics_queue.waitIdle();
-        }
+        size_t vertex_buffer_size_in_bytes = sizeof(Vertex) * vertices.size();
+        size_t indices_size_in_bytes = sizeof(uint32_t) * indices.size();
+        vk::raii::Buffer vertex_buffer = allocator.AsBuffer(
+            vertices.data(), vertex_buffer_size_in_bytes, vk::BufferUsageFlagBits::eVertexBuffer);
+        vk::raii::Buffer index_buffer = allocator.AsBuffer(
+            indices.data(), indices_size_in_bytes, vk::BufferUsageFlagBits::eIndexBuffer);
 
         std::cout << "---------------------\n";
-        //std::chrono::time_point<std::chrono::system_clock> t0 = std::chrono::system_clock::now();
         bool not_done = true;
         int ix = 500;
         while (not_done) {
             glfwPollEvents();
             int state = glfwGetKey(window.get(), GLFW_KEY_Q);
-            if (state == GLFW_PRESS) {
-                not_done = false;
-            }
-            //std::chrono::time_point<std::chrono::system_clock> t1 = std::chrono::system_clock::now();
-            //if (std::chrono::duration_cast<std::chrono::seconds>(t1 - t0).count() > 2) {
-            //    glfwPollEvents();
-            //}
-            //if (std::chrono::duration_cast<std::chrono::seconds>(t1 - t0).count() > 5) {
-            //    not_done = false;
-            //}
-            //vertices[0].position.x = delta - 2.0 * delta * (static_cast<float>(ix) / 500.0f);
-            //ix = (ix + 1) % 500;
-
-            //const vk::raii::DeviceMemory& device_memory = vulkan_state.device_memory.at(0);
-            //const vk::MemoryRequirements& buffers_mem_reqs = vulkan_state.buffers_mem_reqs.at(0);
-            //void* data = device_memory.mapMemory(0, buffers_mem_reqs.size);
-            //void* data = vulkan_state.mapped_buffers.at(0);
-            //std::memcpy(data, vertices.data(), vertex_buffer_size_in_bytes);
-            //device_memory.unmapMemory();
-
-            DrawFrame(vulkan_state, buffer_v, buffer_i, indices.size() / 3 * 3);
+            if (state == GLFW_PRESS) { not_done = false; }
+            DrawFrame(vulkan_state, vertex_buffer, index_buffer, indices.size() / 3 * 3);
             vulkan_state.devices.at(0).waitIdle();
         }
-        //while (sys_window.ProcessEvents()) { ; }
-        //std::cin >> a;
     } catch (std::exception const& exp) {
         std::cout << "Exception caught\n" << exp.what() << std::endl;
     }
 
-    std::cout << fmt::format("End\n");
+    std::cout << std::format("End\n");
     return 0;
 }
 
@@ -274,9 +148,6 @@ jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State& vulkan_state,
                               LoadShaders(vulkan_state.devices.at(0)));
     vulkan_state.InitQueues(vulkan_state.devices.at(0), queue_family_index);
     vulkan_state.InitSwapchain(vulkan_state.devices.at(0), vulkan_state.render_info, vulkan_state.surface, vulkan_state.render_passes.at(0));
-    const vk::raii::Semaphore& image_available_semaphore = vulkan_state.semaphores.at(0);
-    const vk::raii::Semaphore& render_finished_semaphore = vulkan_state.semaphores.at(0);
-    const vk::raii::Fence& in_flight_fence = vulkan_state.fences.at(0);
     return window;
 }
 
