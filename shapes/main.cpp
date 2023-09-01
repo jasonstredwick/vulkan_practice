@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <exception>
 #include <expected>
+#include <format>
 #include <iostream>
 #include <memory>
 #include <numbers>
@@ -12,12 +13,13 @@
 #include <string>
 #include <vector>
 
-#include <fmt/core.h>
-
+#include "jms/utils/no_mutex.hpp"
 #include "jms/vulkan/glm.hpp"
 #include "jms/vulkan/vulkan.hpp"
 #include "jms/vulkan/camera.hpp"
 #include "jms/vulkan/commands.hpp"
+#include "jms/vulkan/memory.hpp"
+#include "jms/vulkan/memory_resource.hpp"
 #include "jms/vulkan/render_info.hpp"
 #include "jms/vulkan/state.hpp"
 #include "jms/vulkan/vertex_description.hpp"
@@ -25,7 +27,6 @@
 #include "jms/wsi/glfw.cpp"
 
 #include "shader.hpp"
-#include "scratch.hpp"
 
 
 constexpr const size_t WIN_WIDTH = 1024;
@@ -48,15 +49,41 @@ jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State&, jms::wsi::glfw::En
 
 
 int main(int argc, char** argv) {
-    std::cout << "start" << std::endl;
+    std::cout << std::format("Start\n");
 
     try {
         jms::vulkan::State vulkan_state{};
         jms::wsi::glfw::Environment glfw_environment{};
         jms::wsi::glfw::Window window = CreateEnvironment(vulkan_state, glfw_environment);
 
-        const vk::raii::PhysicalDevice& physical_device = vulkan_state.physical_devices.at(0);
-        const vk::raii::Device& device = vulkan_state.devices.at(0);
+
+        vk::raii::PhysicalDevice& physical_device = vulkan_state.physical_devices.at(0);
+        vk::raii::Device& device = vulkan_state.devices.at(0);
+        vk::AllocationCallbacks vk_allocation_callbacks{};
+        jms::vulkan::MemoryHelper memory_helper{physical_device, device, vk_allocation_callbacks};
+
+        uint32_t dyn_memory_type_index = memory_helper.GetIndexOrThrow(
+            std::mem_fn(&jms::vulkan::MemoryHelper::GetHostVisibleDeviceMemoryResourceCapableMemoryType));
+        jms::vulkan::DeviceMemoryResource dyn_dmr = memory_helper.CreateDirectMemoryResource(dyn_memory_type_index);
+        auto dyn_allocator = memory_helper.CreateHostVisibleDeviceMemoryResource<std::pmr::vector, jms::NoMutex>(dyn_dmr);
+
+        uint32_t dev_local_memory_type_index = memory_helper.GetIndexOrThrow(
+            std::mem_fn(&jms::vulkan::MemoryHelper::GetDeviceLocalMemoryType));
+        jms::vulkan::DeviceMemoryResource local_dmr = memory_helper.CreateDirectMemoryResource(dev_local_memory_type_index);
+        using BufferResource = jms::vulkan::BufferResource<jms::vulkan::DeviceMemoryAllocation,
+                                                           std::pmr::vector,
+                                                           jms::NoMutex>;
+        auto vertex_allocator = memory_helper.CreateResource<BufferResource>(
+            local_dmr, device, vk_allocation_callbacks,
+            vk::BufferUsageFlagBits::eVertexBuffer & vk::BufferUsageFlagBits::eTransferDst);
+        auto index_allocator = memory_helper.CreateResource<BufferResource>(
+            local_dmr, device, vk_allocation_callbacks,
+            vk::BufferUsageFlagBits::eIndexBuffer & vk::BufferUsageFlagBits::eTransferDst);
+        auto uniform_dst_allocator = memory_helper.CreateResource<BufferResource>(
+            local_dmr, device, vk_allocation_callbacks,
+            vk::BufferUsageFlagBits::eUniformBuffer & vk::BufferUsageFlagBits::eTransferDst);
+
+
         std::vector<uint32_t> optimal_indices = jms::vulkan::FindOptimalIndices(physical_device);
 
         /***
@@ -318,7 +345,7 @@ int main(int argc, char** argv) {
             .pTexelBufferView=nullptr
         }}, {});
 
-        std::cout << "---------------------\n";
+        std::cout << std::format("---------------------\n");
         //std::chrono::time_point<std::chrono::system_clock> t0 = std::chrono::system_clock::now();
         bool not_done = true;
         int ix = 500;
@@ -354,7 +381,7 @@ int main(int argc, char** argv) {
         std::cout << "Exception caught\n" << exp.what() << std::endl;
     }
 
-    std::cout << fmt::format("End\n");
+    std::cout << std::format("End\n");
     return 0;
 }
 
@@ -365,7 +392,7 @@ jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State& vulkan_state,
 
     jms::wsi::glfw::Window window = jms::wsi::glfw::Window::DefaultCreate(WIN_WIDTH, WIN_HEIGHT);
     auto [width, height] = window.DimsPixel();
-    std::cout << "Dims: (" << width << ", " << height << ")" << std::endl;
+    std::cout << std::format("Dims: ({}, {})\n", width, height);
     std::vector<std::string> window_instance_extensions= jms::wsi::glfw::GetVulkanInstanceExtensions();
 
     std::vector<std::string> required_instance_extensions{};

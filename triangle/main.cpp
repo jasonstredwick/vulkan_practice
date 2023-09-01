@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <exception>
 #include <expected>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <set>
@@ -14,6 +15,8 @@
 #include "jms/utils/no_mutex.hpp"
 #include "jms/vulkan/camera.hpp"
 #include "jms/vulkan/commands.hpp"
+#include "jms/vulkan/memory.hpp"
+#include "jms/vulkan/memory_resource.hpp"
 #include "jms/vulkan/render_info.hpp"
 #include "jms/vulkan/state.hpp"
 #include "jms/vulkan/vertex_description.hpp"
@@ -44,12 +47,13 @@ int main(int argc, char** argv) {
         vk::raii::Device& device = vulkan_state.devices.at(0);
         vk::AllocationCallbacks vk_allocation_callbacks{};
         jms::vulkan::MemoryHelper memory_helper{physical_device, device, vk_allocation_callbacks};
-        uint32_t memory_type_index = memory_helper.GetHostVisibleDeviceMemoryResourceCapableMemoryType();
-        jms::vulkan::DeviceMemoryResource dmr = memory_helper.CreateDirectMemoryResource(memory_type_index);
-        auto allocator = memory_helper.CreateHostVisibleDeviceMemoryResource<std::pmr::vector, jms::NoMutex>(dmr);
+        uint32_t dyn_memory_type_index = memory_helper.GetIndexOrThrow(
+            std::mem_fn(&jms::vulkan::MemoryHelper::GetHostVisibleDeviceMemoryResourceCapableMemoryType));
+        jms::vulkan::DeviceMemoryResource dyn_dmr = memory_helper.CreateDirectMemoryResource(dyn_memory_type_index);
+        auto dyn_allocator = memory_helper.CreateHostVisibleDeviceMemoryResource<std::pmr::vector, jms::NoMutex>(dyn_dmr);
 
-        std::pmr::vector<Vertex> vertices{&allocator};
-        std::pmr::vector<uint32_t> indices{&allocator};
+        std::pmr::vector<Vertex> vertices{&dyn_allocator};
+        std::pmr::vector<uint32_t> indices{&dyn_allocator};
 
         vertices = {
             {{0.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
@@ -68,9 +72,9 @@ int main(int argc, char** argv) {
 
         size_t vertex_buffer_size_in_bytes = sizeof(Vertex) * vertices.size();
         size_t indices_size_in_bytes = sizeof(uint32_t) * indices.size();
-        vk::raii::Buffer vertex_buffer = allocator.AsBuffer(
+        vk::raii::Buffer vertex_buffer = dyn_allocator.AsBuffer(
             vertices.data(), vertex_buffer_size_in_bytes, vk::BufferUsageFlagBits::eVertexBuffer);
-        vk::raii::Buffer index_buffer = allocator.AsBuffer(
+        vk::raii::Buffer index_buffer = dyn_allocator.AsBuffer(
             indices.data(), indices_size_in_bytes, vk::BufferUsageFlagBits::eIndexBuffer);
 
         std::cout << "---------------------\n";

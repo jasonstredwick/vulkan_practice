@@ -3,7 +3,7 @@ LINK = g++-13
 GLSLC = glslc
 CPPFLAGS = -std=c++23 -I. -I..
 LDFLAGS =
-LIBS = -lvulkan -lglfw -lfmt
+LIBS = -lvulkan -lglfw
 
 OBJS = main.o
 EXES = a.exe

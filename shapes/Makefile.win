@@ -1,9 +1,9 @@
 CC = cl.exe
 LINK = link
 GLSLC = glslc.exe
-CPPFLAGS = /std:c++latest /utf-8 /EHsc -I. -I.. -I..\..\third_party\vcpkg\installed\x64-windows-static\include -IC:\VulkanSDK\1.3.231.1\Include
-LDFLAGS = /SUBSYSTEM:CONSOLE /LIBPATH:C:\VulkanSDK\1.3.231.1\lib /LIBPATH:..\..\third_party\vcpkg\installed\x64-windows-static\lib
-LIBS = User32.lib Kernel32.lib Gdi32.lib Shell32.lib vulkan-1.lib glfw3.lib fmt.lib
+CPPFLAGS = /std:c++latest /utf-8 /EHsc -I. -I.. -I..\..\third_party\vcpkg\installed\x64-windows-static\include -IC:\VulkanSDK\current\Include
+LDFLAGS = /SUBSYSTEM:CONSOLE /LIBPATH:C:\VulkanSDK\current\lib /LIBPATH:..\..\third_party\vcpkg\installed\x64-windows-static\lib
+LIBS = User32.lib Kernel32.lib Gdi32.lib Shell32.lib vulkan-1.lib glfw3.lib
 
 OBJS = main.obj
 EXES = a.exe
