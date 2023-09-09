@@ -1,11 +1,10 @@
 #include <array>
-#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <exception>
-#include <expected>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <set>
 #include <stdexcept>
@@ -13,8 +12,6 @@
 #include <vector>
 
 #include "jms/utils/no_mutex.hpp"
-#include "jms/vulkan/camera.hpp"
-#include "jms/vulkan/commands.hpp"
 #include "jms/vulkan/memory.hpp"
 #include "jms/vulkan/memory_resource.hpp"
 #include "jms/vulkan/render_info.hpp"
@@ -31,8 +28,12 @@ constexpr const size_t WIN_WIDTH = 1024;
 constexpr const size_t WIN_HEIGHT = 1024;
 
 
-void DrawFrame(const jms::vulkan::State& vulkan_state, const vk::raii::Buffer& vertex_buffer, const vk::raii::Buffer& index_buffer, uint32_t num_indices);
+void DrawFrame(const jms::vulkan::State& vulkan_state,
+               const vk::raii::Buffer& vertex_buffer, const vk::raii::Buffer& index_buffer, uint32_t num_indices);
 jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State&, jms::wsi::glfw::Environment&);
+
+
+template <typename T> size_t NumBytes(const T& t) noexcept { return t.size() * sizeof(T::value_type); }
 
 
 int main(int argc, char** argv) {
@@ -47,20 +48,20 @@ int main(int argc, char** argv) {
         vk::raii::Device& device = vulkan_state.devices.at(0);
         vk::AllocationCallbacks vk_allocation_callbacks{};
         jms::vulkan::MemoryHelper memory_helper{physical_device, device, vk_allocation_callbacks};
-        uint32_t dyn_memory_type_index = memory_helper.GetIndexOrThrow(
-            std::mem_fn(&jms::vulkan::MemoryHelper::GetHostVisibleDeviceMemoryResourceCapableMemoryType));
+        auto dyn_memory_type_index = memory_helper.GetDeviceMemoryResourceMappedCapableMemoryType();
+        if (dyn_memory_type_index == std::numeric_limits<uint32_t>::max()) {
+            throw std::runtime_error{"Could not find a suitable, requested memory type."};
+        }
         jms::vulkan::DeviceMemoryResource dyn_dmr = memory_helper.CreateDirectMemoryResource(dyn_memory_type_index);
-        auto dyn_allocator = memory_helper.CreateHostVisibleDeviceMemoryResource<std::pmr::vector, jms::NoMutex>(dyn_dmr);
+        auto dyn_allocator = memory_helper.CreateDeviceMemoryResourceMapped<std::pmr::vector, jms::NoMutex>(dyn_dmr);
 
-        std::pmr::vector<Vertex> vertices{&dyn_allocator};
-        std::pmr::vector<uint32_t> indices{&dyn_allocator};
-
-        vertices = {
+        std::pmr::vector<Vertex> vertices{{
             {{0.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
             {{0.5f, 0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
             {{0.5f, 0.5f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}}
-        };
-        indices = {0, 2, 1};
+        }, &dyn_allocator};
+        std::pmr::vector<uint32_t> indices{{0, 2, 1}, &dyn_allocator};
+        assert(indices.size() % 3 == 0);
 
         // testing MemoryDevice re-allocation with std::pmr::vector
         vertices.push_back({{0.5f, 0.5f, 0.0f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}});
@@ -70,12 +71,10 @@ int main(int argc, char** argv) {
         indices.push_back(5);
         indices.push_back(4);
 
-        size_t vertex_buffer_size_in_bytes = sizeof(Vertex) * vertices.size();
-        size_t indices_size_in_bytes = sizeof(uint32_t) * indices.size();
         vk::raii::Buffer vertex_buffer = dyn_allocator.AsBuffer(
-            vertices.data(), vertex_buffer_size_in_bytes, vk::BufferUsageFlagBits::eVertexBuffer);
+            vertices.data(), NumBytes(vertices), vk::BufferUsageFlagBits::eVertexBuffer);
         vk::raii::Buffer index_buffer = dyn_allocator.AsBuffer(
-            indices.data(), indices_size_in_bytes, vk::BufferUsageFlagBits::eIndexBuffer);
+            indices.data(), NumBytes(indices), vk::BufferUsageFlagBits::eIndexBuffer);
 
         std::cout << "---------------------\n";
         bool not_done = true;
@@ -147,16 +146,7 @@ jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State& vulkan_state,
                               vulkan_state.render_passes.at(0),
                               vulkan_state.render_info.extent,
                               jms::vulkan::VertexDescription::Create<Vertex>(0),
-                              std::vector<vk::DescriptorSetLayoutBinding>{/*
-                                jms::vulkan::UniformBufferObject::Binding(0),
-                                vk::DescriptorSetLayoutBinding{
-                                    .binding=1,
-                                    .descriptorType=vk::DescriptorType::eStorageImage,
-                                    .descriptorCount=1,
-                                    .stageFlags=vk::ShaderStageFlagBits::eFragment,
-                                    .pImmutableSamplers=nullptr
-                                }
-                              */},
+                              std::vector<vk::DescriptorSetLayoutBinding>{},
                               LoadShaders(vulkan_state.devices.at(0)));
     vulkan_state.InitQueues(vulkan_state.devices.at(0), queue_family_index);
     vulkan_state.InitSwapchain(vulkan_state.devices.at(0), vulkan_state.render_info, vulkan_state.surface, vulkan_state.render_passes.at(0));

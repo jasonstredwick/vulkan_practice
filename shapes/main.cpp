@@ -3,7 +3,6 @@
 #include <cmath>
 #include <cstddef>
 #include <exception>
-#include <expected>
 #include <format>
 #include <iostream>
 #include <memory>
@@ -36,7 +35,6 @@ constexpr const size_t WIN_HEIGHT = 1024;
 struct DrawState {
     const jms::vulkan::State& vulkan_state;
     vk::Buffer vertex_buffer;
-    vk::Buffer vertex_data_buffer;
     vk::Buffer index_buffer;
     const uint32_t num_indices;
     vk::Viewport viewport;
@@ -45,7 +43,13 @@ struct DrawState {
 
 
 void DrawFrame(const DrawState& draw_state);
-jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State&, jms::wsi::glfw::Environment&);
+jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State&,
+                                         jms::wsi::glfw::Environment&,
+                                         const jms::vulkan::VertexDescription& vertex_desc,
+                                         const std::vector<vk::DescriptorSetLayoutBinding>& layout_bindings);
+
+
+template <typename T> size_t NumBytes(const T& t) noexcept { return t.size() * sizeof(T::value_type); }
 
 
 int main(int argc, char** argv) {
@@ -54,37 +58,81 @@ int main(int argc, char** argv) {
     try {
         jms::vulkan::State vulkan_state{};
         jms::wsi::glfw::Environment glfw_environment{};
-        jms::wsi::glfw::Window window = CreateEnvironment(vulkan_state, glfw_environment);
+        jms::wsi::glfw::Window window = CreateEnvironment(
+            vulkan_state,
+            glfw_environment,
+            jms::vulkan::VertexDescription::Create<Vertex>(0),
+            std::vector<vk::DescriptorSetLayoutBinding>{
+                vk::DescriptorSetLayoutBinding{
+                    .binding=0,
+                    .descriptorType=vk::DescriptorType::eStorageBuffer,
+                    .descriptorCount=1,
+                    .stageFlags=vk::ShaderStageFlagBits::eVertex,
+                    .pImmutableSamplers=nullptr
+                },
+                vk::DescriptorSetLayoutBinding{
+                    .binding=1,
+                    .descriptorType=vk::DescriptorType::eStorageBuffer,
+                    .descriptorCount=1,
+                    .stageFlags=vk::ShaderStageFlagBits::eVertex,
+                    .pImmutableSamplers=nullptr
+                },
+                vk::DescriptorSetLayoutBinding{
+                    .binding=2,
+                    .descriptorType=vk::DescriptorType::eStorageBuffer,
+                    .descriptorCount=1,
+                    .stageFlags=vk::ShaderStageFlagBits::eVertex,
+                    .pImmutableSamplers=nullptr
+                }
+            });
 
 
         vk::raii::PhysicalDevice& physical_device = vulkan_state.physical_devices.at(0);
         vk::raii::Device& device = vulkan_state.devices.at(0);
         vk::AllocationCallbacks vk_allocation_callbacks{};
         jms::vulkan::MemoryHelper memory_helper{physical_device, device, vk_allocation_callbacks};
-
-        uint32_t dyn_memory_type_index = memory_helper.GetIndexOrThrow(
-            std::mem_fn(&jms::vulkan::MemoryHelper::GetHostVisibleDeviceMemoryResourceCapableMemoryType));
+        auto dyn_memory_type_index = memory_helper.GetDeviceMemoryResourceMappedCapableMemoryType();
+        if (dyn_memory_type_index == std::numeric_limits<uint32_t>::max()) {
+            throw std::runtime_error{"Could not find a suitable, requested memory type."};
+        }
         jms::vulkan::DeviceMemoryResource dyn_dmr = memory_helper.CreateDirectMemoryResource(dyn_memory_type_index);
-        auto dyn_allocator = memory_helper.CreateHostVisibleDeviceMemoryResource<std::pmr::vector, jms::NoMutex>(dyn_dmr);
+        auto dyn_allocator = memory_helper.CreateDeviceMemoryResourceMapped<std::pmr::vector, jms::NoMutex>(dyn_dmr);
+        auto obj_allocator = std::pmr::polymorphic_allocator{&dyn_allocator};
 
-        uint32_t dev_local_memory_type_index = memory_helper.GetIndexOrThrow(
-            std::mem_fn(&jms::vulkan::MemoryHelper::GetDeviceLocalMemoryType));
-        jms::vulkan::DeviceMemoryResource local_dmr = memory_helper.CreateDirectMemoryResource(dev_local_memory_type_index);
-        using BufferResource = jms::vulkan::BufferResource<jms::vulkan::DeviceMemoryAllocation,
-                                                           std::pmr::vector,
-                                                           jms::NoMutex>;
-        auto vertex_allocator = memory_helper.CreateResource<BufferResource>(
-            local_dmr, device, vk_allocation_callbacks,
-            vk::BufferUsageFlagBits::eVertexBuffer & vk::BufferUsageFlagBits::eTransferDst);
-        auto index_allocator = memory_helper.CreateResource<BufferResource>(
-            local_dmr, device, vk_allocation_callbacks,
-            vk::BufferUsageFlagBits::eIndexBuffer & vk::BufferUsageFlagBits::eTransferDst);
-        auto uniform_dst_allocator = memory_helper.CreateResource<BufferResource>(
-            local_dmr, device, vk_allocation_callbacks,
-            vk::BufferUsageFlagBits::eUniformBuffer & vk::BufferUsageFlagBits::eTransferDst);
+        std::pmr::vector<Vertex> vertices{{
+            {.model_index=0, .position={0.0f, 0.0f, 0.0f}},
+            {.model_index=0, .position={-5.0f, 0.0f, 0.0f}},
+            {.model_index=0, .position={-5.0f, -5.0f, 0.0f}},
 
+            {.model_index=1, .position={ 0.0f,  0.0f, 0.0f}},
+            {.model_index=1, .position={13.0f,  0.0f, 0.0f}},
+            {.model_index=1, .position={13.0f, 13.0f, 0.0f}},
+            {.model_index=1, .position={ 0.0f, 13.0f, 0.0f}}
+        }, &dyn_allocator};
 
-        std::vector<uint32_t> optimal_indices = jms::vulkan::FindOptimalIndices(physical_device);
+        std::pmr::vector<uint32_t> indices{{0, 2, 1, 3, 5, 4, 3, 6, 5}, &dyn_allocator};
+
+        std::pmr::vector<VertexData> vertex_data{{
+            {.color={1.0f, 0.0f, 0.0f, 1.0f}},
+            {.color={1.0f, 0.0f, 0.0f, 1.0f}},
+            {.color={1.0f, 0.0f, 0.0f, 1.0f}},
+
+            {.color={1.0f, 1.0f, 1.0f, 1.0f}},
+            {.color={1.0f, 1.0f, 1.0f, 1.0f}},
+            {.color={1.0f, 1.0f, 1.0f, 1.0f}},
+            {.color={1.0f, 1.0f, 1.0f, 1.0f}}
+        }, &dyn_allocator};
+
+        std::pmr::vector<ModelData> model_transform_data{{
+            ModelData{.transform=glm::mat4{1.0f}},
+            ModelData{.transform=glm::mat4{1.0f}}
+            //ModelData{.transform=glm::mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.75, 0, 0, 1)},//glm::mat4{1.0f},
+            //ModelData{.transform=glm::mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -0.25, 0, 0, 1)}//glm::mat4{1.0f}
+        }, &dyn_allocator};
+        //model_transform_data = {
+        //    ModelData{.transform=glm::mat4{1.0f}},
+        //    ModelData{.transform=glm::mat4{1.0f}}
+        //};
 
         /***
          * World
@@ -102,179 +150,29 @@ int main(int argc, char** argv) {
             glm::lookAt(glm::vec3{-5.0f, -3.0f, -10.0f}, glm::vec3{0.0f, 0.0f, 0.0f}, glm::vec3{0.0f, -1.0f, 0.0f}),
             glm::mat4(1.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.5f, 1.0f)//glm::mat4{1.0f}//glm::infinitePerspective(glm::radians(60.0f), static_cast<float>(WIN_WIDTH) / static_cast<float>(WIN_HEIGHT), 0.1f)
         };
-        std::vector<Vertex> vertices = {
-            {.model_index=0, .position={0.0f, 0.0f, 0.0f}},
-            {.model_index=0, .position={-5.0f, 0.0f, 0.0f}},
-            {.model_index=0, .position={-5.0f, -5.0f, 0.0f}},
-
-            {.model_index=1, .position={ 0.0f,  0.0f, 0.0f}},
-            {.model_index=1, .position={13.0f,  0.0f, 0.0f}},
-            {.model_index=1, .position={13.0f, 13.0f, 0.0f}},
-            {.model_index=1, .position={ 0.0f, 13.0f, 0.0f}}
-        };
-        std::vector<VertexData> vertex_data = {
-            {.color={1.0f, 0.0f, 0.0f, 1.0f}},
-            {.color={1.0f, 0.0f, 0.0f, 1.0f}},
-            {.color={1.0f, 0.0f, 0.0f, 1.0f}},
-
-            {.color={1.0f, 1.0f, 1.0f, 1.0f}},
-            {.color={1.0f, 1.0f, 1.0f, 1.0f}},
-            {.color={1.0f, 1.0f, 1.0f, 1.0f}},
-            {.color={1.0f, 1.0f, 1.0f, 1.0f}}
-        };
-        std::vector<ModelData> model_transform_data = {
-            ModelData{.transform=glm::mat4{1.0f}},
-            ModelData{.transform=glm::mat4{1.0f}}
-            //ModelData{.transform=glm::mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.75, 0, 0, 1)},//glm::mat4{1.0f},
-            //ModelData{.transform=glm::mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -0.25, 0, 0, 1)}//glm::mat4{1.0f}
-        };
-        //std::vector<ModelData> model_transform_data = {
-        //    ModelData{.transform=glm::mat4{1.0f}},
-        //    ModelData{.transform=glm::mat4{1.0f}}
+        //jms::vulkan::UniqueMappedResource<jms::vulkan::Camera> camera{
+        //    obj_allocator,
+        //    glm::lookAt(glm::vec3{-5.0f, -3.0f, -10.0f}, glm::vec3{0.0f, 0.0f, 0.0f}, glm::vec3{0.0f, -1.0f, 0.0f}),
+        //    glm::mat4(1.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.5f, 1.0f)//glm::mat4{1.0f}//glm::infinitePerspective(glm::radians(60.0f), static_cast<float>(WIN_WIDTH) / static_cast<float>(WIN_HEIGHT), 0.1f)
         //};
-        std::vector<uint32_t> indices = {0, 2, 1, 3, 5, 4, 3, 6, 5};
-        assert(indices.size() % 3 == 0);
         //std::vector<glm::mat4> camera_data = {camera.projection * glm::perspective(glm::radians(45.0f), 1.0f, 0.1f, 100.0f), camera.model_view};
         glm::mat4 camera_view{1.0f};
         camera_view = glm::translate(camera_view, glm::vec3(0, 0, -5.0f));
         glm::mat4 projection = glm::perspective(glm::radians(45.0f), 1.0f, 0.1f, 100.0f);
         glm::mat4 mvp = projection * camera_view;
-        std::vector<glm::mat4> camera_data{mvp};
+        std::pmr::vector<glm::mat4> camera_data{{mvp}, &dyn_allocator};
+        //std::vector<glm::mat4> camera_data{mvp};
 
-        jms::vulkan::GPUStorageBuffer<Vertex> vertex_storage_buffer{
-            device,
-            physical_device,
-            optimal_indices,
-            vertices.size(),
-            vk::BufferUsageFlags(vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst)
-        };
-        jms::vulkan::GPUStorageBuffer<VertexData> vertex_data_storage_buffer{
-            device,
-            physical_device,
-            optimal_indices,
-            vertices.size(),
-            vk::BufferUsageFlags(vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferDst)
-        };
-        jms::vulkan::GPUStorageBuffer<uint32_t> indices_storage_buffer{
-            device,
-            physical_device,
-            optimal_indices,
-            indices.size(),
-            vk::BufferUsageFlags(vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eTransferDst)
-        };
-        jms::vulkan::GPUStorageBuffer<ModelData> model_transform_storage_buffer{
-            device,
-            physical_device,
-            optimal_indices,
-            model_transform_data.size(),
-            vk::BufferUsageFlags(vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferDst)
-        };
-        jms::vulkan::GPUStorageBuffer<glm::mat4> camera_buffer{
-            device,
-            physical_device,
-            optimal_indices,
-            1,
-            vk::BufferUsageFlags(vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferDst)
-        };
-        DrawState draw_state{
-            .vulkan_state=vulkan_state,
-            .vertex_buffer=*vertex_storage_buffer.buffer,
-            .vertex_data_buffer=*vertex_data_storage_buffer.buffer,
-            .index_buffer=*indices_storage_buffer.buffer,
-            .num_indices=static_cast<uint32_t>(indices.size())
-        };
-
-
-        /***
-         * COPY DATA TO GPU
-         */
-        {
-            jms::vulkan::HostStorageBuffer<decltype(vertex_storage_buffer)::value_type_t> vertex_staging_buffer{
-                device,
-                physical_device,
-                optimal_indices,
-                vertex_storage_buffer.num_elements,
-                vk::BufferUsageFlags(vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferSrc),
-                {}
-            };
-            jms::vulkan::HostStorageBuffer<decltype(vertex_data_storage_buffer)::value_type_t> vertex_data_staging_buffer{
-                device,
-                physical_device,
-                optimal_indices,
-                vertex_data_storage_buffer.num_elements,
-                vk::BufferUsageFlags(vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferSrc),
-                {}
-            };
-            jms::vulkan::HostStorageBuffer<decltype(indices_storage_buffer)::value_type_t> indices_staging_buffer{
-                device,
-                physical_device,
-                optimal_indices,
-                indices_storage_buffer.num_elements,
-                vk::BufferUsageFlags(vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eTransferSrc),
-                {}
-            };
-            jms::vulkan::HostStorageBuffer<decltype(model_transform_storage_buffer)::value_type_t> model_transform_staging_buffer{
-                device,
-                physical_device,
-                optimal_indices,
-                model_transform_storage_buffer.num_elements,
-                vk::BufferUsageFlags(vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferSrc),
-                {}
-            };
-            jms::vulkan::HostStorageBuffer<decltype(camera_buffer)::value_type_t> camera_staging_buffer{
-                device,
-                physical_device,
-                optimal_indices,
-                camera_buffer.num_elements,
-                vk::BufferUsageFlags(vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferSrc),
-                {}
-            };
-            vertex_staging_buffer.Copy(vertices);
-            vertex_data_staging_buffer.Copy(vertex_data);
-            indices_staging_buffer.Copy(indices);
-            model_transform_staging_buffer.Copy(model_transform_data);
-            camera_staging_buffer.Copy(camera_data);
-            std::vector<vk::raii::CommandBuffer> cbs = device.allocateCommandBuffers({
-                .commandPool=*(vulkan_state.command_pools.at(0)),
-                .level=vk::CommandBufferLevel::ePrimary,
-                .commandBufferCount=1
-            });
-            std::vector<vk::CommandBuffer> vk_cbs{};
-            std::ranges::transform(cbs, std::back_inserter(vk_cbs), [](auto& v) { return *v; });
-            vk::raii::CommandBuffer& cb = cbs.at(0);
-            cb.begin({.flags=vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
-            cb.copyBuffer(*vertex_staging_buffer.buffer, *vertex_storage_buffer.buffer, {{
-                .srcOffset=0,
-                .dstOffset=0,
-                .size=vertex_storage_buffer.buffer_size
-            }});
-            cb.copyBuffer(*vertex_data_staging_buffer.buffer, *vertex_data_storage_buffer.buffer, {{
-                .srcOffset=0,
-                .dstOffset=0,
-                .size=vertex_data_storage_buffer.buffer_size
-            }});
-            cb.copyBuffer(*indices_staging_buffer.buffer, *indices_storage_buffer.buffer, {{
-                .srcOffset=0,
-                .dstOffset=0,
-                .size=indices_storage_buffer.buffer_size
-            }});
-            cb.copyBuffer(*model_transform_staging_buffer.buffer, *model_transform_storage_buffer.buffer, {{
-                .srcOffset=0,
-                .dstOffset=0,
-                .size=model_transform_storage_buffer.buffer_size
-            }});
-            cb.copyBuffer(*camera_staging_buffer.buffer, *camera_buffer.buffer, {{
-                .srcOffset=0,
-                .dstOffset=0,
-                .size=camera_staging_buffer.buffer_size
-            }});
-            cb.end();
-            vulkan_state.graphics_queue.submit({{
-                .commandBufferCount=static_cast<uint32_t>(vk_cbs.size()),
-                .pCommandBuffers=vk_cbs.data()
-            }});
-            vulkan_state.graphics_queue.waitIdle();
-        }
+        vk::raii::Buffer vertex_buffer = dyn_allocator.AsBuffer(
+            vertices.data(), NumBytes(vertices), vk::BufferUsageFlagBits::eVertexBuffer);
+        vk::raii::Buffer index_buffer = dyn_allocator.AsBuffer(
+            indices.data(), NumBytes(indices), vk::BufferUsageFlagBits::eIndexBuffer);
+        vk::raii::Buffer vertex_data_buffer = dyn_allocator.AsBuffer(
+            vertex_data.data(), NumBytes(vertex_data), vk::BufferUsageFlagBits::eStorageBuffer);
+        vk::raii::Buffer model_data_buffer = dyn_allocator.AsBuffer(
+            model_transform_data.data(), NumBytes(model_transform_data), vk::BufferUsageFlagBits::eStorageBuffer);
+        vk::raii::Buffer camera_buffer = dyn_allocator.AsBuffer(
+            camera_data.data(), NumBytes(camera_data), vk::BufferUsageFlagBits::eStorageBuffer);
 
         /***
          * Update draw state
@@ -302,19 +200,19 @@ int main(int argc, char** argv) {
         });
 
         vk::DescriptorBufferInfo vertex_data_buffer_info{
-            .buffer=*vertex_data_storage_buffer.buffer,
+            .buffer=*vertex_data_buffer,
             .offset=0,
-            .range=vertex_data_storage_buffer.buffer_size
+            .range=NumBytes(vertex_data)
         };
         vk::DescriptorBufferInfo model_transform_storage_buffer_info{
-            .buffer=*model_transform_storage_buffer.buffer,
+            .buffer=*model_data_buffer,
             .offset=0,
-            .range=model_transform_storage_buffer.buffer_size
+            .range=NumBytes(model_transform_data)
         };
         vk::DescriptorBufferInfo camera_buffer_info{
-            .buffer=*camera_buffer.buffer,
+            .buffer=*camera_buffer,
             .offset=0,
-            .range=camera_buffer.buffer_size
+            .range=NumBytes(camera_data)
         };
         vulkan_state.devices.at(0).updateDescriptorSets({{
             .dstSet=*vulkan_state.descriptor_sets.at(0),
@@ -344,6 +242,13 @@ int main(int argc, char** argv) {
             .pBufferInfo=&camera_buffer_info,
             .pTexelBufferView=nullptr
         }}, {});
+
+        DrawState draw_state{
+            .vulkan_state=vulkan_state,
+            .vertex_buffer=*vertex_buffer,
+            .index_buffer=*index_buffer,
+            .num_indices=static_cast<uint32_t>(indices.size())
+        };
 
         std::cout << std::format("---------------------\n");
         //std::chrono::time_point<std::chrono::system_clock> t0 = std::chrono::system_clock::now();
@@ -387,7 +292,9 @@ int main(int argc, char** argv) {
 
 
 jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State& vulkan_state,
-                                         jms::wsi::glfw::Environment& glfw_environment) {
+                                         jms::wsi::glfw::Environment& glfw_environment,
+                                         const jms::vulkan::VertexDescription& vertex_desc,
+                                         const std::vector<vk::DescriptorSetLayoutBinding>& layout_bindings) {
     glfw_environment.EnableHIDPI();
 
     jms::wsi::glfw::Window window = jms::wsi::glfw::Window::DefaultCreate(WIN_WIDTH, WIN_HEIGHT);
@@ -405,7 +312,7 @@ jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State& vulkan_state,
         .app_name=std::string{"tut4"},
         .engine_name=std::string{"tut4.e"},
         .layer_names={
-            //std::string{"VK_LAYER_KHRONOS_synchronization2"}
+            std::string{"VK_LAYER_KHRONOS_synchronization2"}
         },
         .extension_names=instance_extensions
     });
