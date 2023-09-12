@@ -33,7 +33,7 @@ void DrawFrame(const jms::vulkan::State& vulkan_state,
 jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State&, jms::wsi::glfw::Environment&);
 
 
-template <typename T> size_t NumBytes(const T& t) noexcept { return t.size() * sizeof(T::value_type); }
+template <typename T> size_t NumBytes(const T& t) noexcept { return t.size() * sizeof(typename T::value_type); }
 
 
 int main(int argc, char** argv) {

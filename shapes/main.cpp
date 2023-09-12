@@ -49,7 +49,7 @@ jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State&,
                                          const std::vector<vk::DescriptorSetLayoutBinding>& layout_bindings);
 
 
-template <typename T> size_t NumBytes(const T& t) noexcept { return t.size() * sizeof(T::value_type); }
+template <typename T> size_t NumBytes(const T& t) noexcept { return t.size() * sizeof(typename T::value_type); }
 
 
 int main(int argc, char** argv) {
