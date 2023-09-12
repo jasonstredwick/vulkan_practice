@@ -89,8 +89,7 @@ int main(int argc, char** argv) {
 
         vk::raii::PhysicalDevice& physical_device = vulkan_state.physical_devices.at(0);
         vk::raii::Device& device = vulkan_state.devices.at(0);
-        vk::AllocationCallbacks vk_allocation_callbacks{};
-        jms::vulkan::MemoryHelper memory_helper{physical_device, device, vk_allocation_callbacks};
+        jms::vulkan::MemoryHelper memory_helper{physical_device, device};
         auto dyn_memory_type_index = memory_helper.GetDeviceMemoryResourceMappedCapableMemoryType();
         if (dyn_memory_type_index == std::numeric_limits<uint32_t>::max()) {
             throw std::runtime_error{"Could not find a suitable, requested memory type."};
