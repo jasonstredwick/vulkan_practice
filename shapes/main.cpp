@@ -33,20 +33,18 @@ constexpr const size_t WIN_HEIGHT = 1024;
 
 
 struct DrawState {
-    const jms::vulkan::State& vulkan_state;
+    jms::vulkan::State& vulkan_state;
+    jms::vulkan::shader::ShaderGroup& shader_group;
     vk::Buffer vertex_buffer;
     vk::Buffer index_buffer;
-    const uint32_t num_indices;
+    uint32_t num_indices;
     vk::Viewport viewport;
     vk::Rect2D scissor;
 };
 
 
-void DrawFrame(const DrawState& draw_state);
-jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State&,
-                                         jms::wsi::glfw::Environment&,
-                                         const jms::vulkan::VertexDescription& vertex_desc,
-                                         const std::vector<vk::DescriptorSetLayoutBinding>& layout_bindings);
+void DrawFrame(DrawState& draw_state);
+jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State&, jms::wsi::glfw::Environment&);
 
 
 template <typename T> size_t NumBytes(const T& t) noexcept { return t.size() * sizeof(typename T::value_type); }
@@ -58,37 +56,13 @@ int main(int argc, char** argv) {
     try {
         jms::vulkan::State vulkan_state{};
         jms::wsi::glfw::Environment glfw_environment{};
-        jms::wsi::glfw::Window window = CreateEnvironment(
-            vulkan_state,
-            glfw_environment,
-            jms::vulkan::VertexDescription::Create<Vertex>(0),
-            std::vector<vk::DescriptorSetLayoutBinding>{
-                vk::DescriptorSetLayoutBinding{
-                    .binding=0,
-                    .descriptorType=vk::DescriptorType::eStorageBuffer,
-                    .descriptorCount=1,
-                    .stageFlags=vk::ShaderStageFlagBits::eVertex,
-                    .pImmutableSamplers=nullptr
-                },
-                vk::DescriptorSetLayoutBinding{
-                    .binding=1,
-                    .descriptorType=vk::DescriptorType::eStorageBuffer,
-                    .descriptorCount=1,
-                    .stageFlags=vk::ShaderStageFlagBits::eVertex,
-                    .pImmutableSamplers=nullptr
-                },
-                vk::DescriptorSetLayoutBinding{
-                    .binding=2,
-                    .descriptorType=vk::DescriptorType::eStorageBuffer,
-                    .descriptorCount=1,
-                    .stageFlags=vk::ShaderStageFlagBits::eVertex,
-                    .pImmutableSamplers=nullptr
-                }
-            });
-
-
+        jms::wsi::glfw::Window window = CreateEnvironment(vulkan_state, glfw_environment);
         vk::raii::PhysicalDevice& physical_device = vulkan_state.physical_devices.at(0);
         vk::raii::Device& device = vulkan_state.devices.at(0);
+
+        std::vector<jms::vulkan::shader::Info> shader_info = LoadShaders(device);
+        jms::vulkan::shader::ShaderGroup shader_group = CreateGroup(device, shader_info);
+
         jms::vulkan::MemoryHelper memory_helper{physical_device, device};
         auto dyn_memory_type_index = memory_helper.GetDeviceMemoryResourceMappedCapableMemoryType();
         if (dyn_memory_type_index == std::numeric_limits<uint32_t>::max()) {
@@ -189,7 +163,7 @@ int main(int argc, char** argv) {
             .pPoolSizes=pool_sizes.data()
         });
         std::vector<vk::DescriptorSetLayout> layouts{};
-        std::ranges::transform(vulkan_state.descriptor_set_layouts, std::back_inserter(layouts), [](auto& dsl) {
+        std::ranges::transform(shader_group.layouts, std::back_inserter(layouts), [](auto& dsl) {
             return *dsl;
         });
         vulkan_state.descriptor_sets = vulkan_state.devices.at(0).allocateDescriptorSets({
@@ -241,9 +215,16 @@ int main(int argc, char** argv) {
             .pBufferInfo=&camera_buffer_info,
             .pTexelBufferView=nullptr
         }}, {});
+        vulkan_state.pipeline_layouts.push_back(device.createPipelineLayout({
+            .setLayoutCount=static_cast<uint32_t>(layouts.size()),
+            .pSetLayouts=layouts.data(),
+            .pushConstantRangeCount=0,
+            .pPushConstantRanges=nullptr
+        }));
 
         DrawState draw_state{
             .vulkan_state=vulkan_state,
+            .shader_group=shader_group,
             .vertex_buffer=*vertex_buffer,
             .index_buffer=*index_buffer,
             .num_indices=static_cast<uint32_t>(indices.size())
@@ -291,9 +272,7 @@ int main(int argc, char** argv) {
 
 
 jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State& vulkan_state,
-                                         jms::wsi::glfw::Environment& glfw_environment,
-                                         const jms::vulkan::VertexDescription& vertex_desc,
-                                         const std::vector<vk::DescriptorSetLayoutBinding>& layout_bindings) {
+                                         jms::wsi::glfw::Environment& glfw_environment) {
     glfw_environment.EnableHIDPI();
 
     jms::wsi::glfw::Window window = jms::wsi::glfw::Window::DefaultCreate(WIN_WIDTH, WIN_HEIGHT);
@@ -301,18 +280,22 @@ jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State& vulkan_state,
     std::cout << std::format("Dims: ({}, {})\n", width, height);
     std::vector<std::string> window_instance_extensions= jms::wsi::glfw::GetVulkanInstanceExtensions();
 
-    std::vector<std::string> required_instance_extensions{};
+    std::vector<std::string> required_instance_extensions{
+        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME
+    };
     std::set<std::string> instance_extensions_set{window_instance_extensions.begin(),
                                                   window_instance_extensions.end()};
     for (auto& i : required_instance_extensions) { instance_extensions_set.insert(i); }
     std::vector<std::string> instance_extensions{instance_extensions_set.begin(), instance_extensions_set.end()};
 
+    std::vector<std::string> required_layers{
+        std::string{"VK_LAYER_KHRONOS_synchronization2"},
+        std::string{"VK_LAYER_KHRONOS_shader_object"}
+    };
     vulkan_state.InitInstance(jms::vulkan::InstanceConfig{
         .app_name=std::string{"tut4"},
         .engine_name=std::string{"tut4.e"},
-        .layer_names={
-            std::string{"VK_LAYER_KHRONOS_synchronization2"}
-        },
+        .layer_names=required_layers,
         .extension_names=instance_extensions
     });
 
@@ -325,10 +308,23 @@ jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State& vulkan_state,
                                                         physical_device,
                                                         static_cast<uint32_t>(width),
                                                         static_cast<uint32_t>(height));
+    std::vector<std::string> required_device_extensions{
+        VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME,
+        VK_EXT_SHADER_OBJECT_EXTENSION_NAME,
+        VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME,
+        VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME,
+        VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME,
+        VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
+        VK_KHR_MAINTENANCE2_EXTENSION_NAME,
+        VK_KHR_MULTIVIEW_EXTENSION_NAME,
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME
+    };
     uint32_t queue_family_index = 0;
     std::vector<float> queue_priority(2, 1.0f); // graphics + presentation
     vulkan_state.InitDevice(physical_device, jms::vulkan::DeviceConfig{
-        .extension_names={std::string{VK_KHR_SWAPCHAIN_EXTENSION_NAME}},
+        .layer_names={},
+        .extension_names=required_device_extensions,
+        .features={},
         .queue_infos=std::move(std::vector<vk::DeviceQueueCreateInfo>{
             // graphics queue + presentation queue
             {
@@ -336,9 +332,14 @@ jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State& vulkan_state,
                 .queueCount=static_cast<uint32_t>(queue_priority.size()),
                 .pQueuePriorities=queue_priority.data()
             }
-        })
+        }),
+        .pnext_features{
+            vk::PhysicalDeviceShaderObjectFeaturesEXT{.shaderObject=true},
+            vk::PhysicalDeviceDynamicRenderingFeatures{.dynamicRendering=true}
+        }
     });
     vulkan_state.InitRenderPass(vulkan_state.devices.at(0), vulkan_state.render_info.format, vulkan_state.render_info.extent);
+#if 0
     vulkan_state.InitPipeline(vulkan_state.devices.at(0),
                               vulkan_state.render_passes.at(0),
                               vulkan_state.render_info.extent,
@@ -367,30 +368,31 @@ jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State& vulkan_state,
                                   }
                               },
                               LoadShaders(vulkan_state.devices.at(0)));
+#endif
     vulkan_state.InitQueues(vulkan_state.devices.at(0), queue_family_index);
     vulkan_state.InitSwapchain(vulkan_state.devices.at(0), vulkan_state.render_info, vulkan_state.surface, vulkan_state.render_passes.at(0));
     return window;
 }
 
 
-void DrawFrame(const DrawState& draw_state) {
-    const auto& vulkan_state = draw_state.vulkan_state;
-    const auto& image_available_semaphore = vulkan_state.semaphores.at(0);
-    const auto& render_finished_semaphore = vulkan_state.semaphores.at(1);
-    const auto& in_flight_fence = vulkan_state.fences.at(0);
-    const auto& device = vulkan_state.devices.at(0);
-    const auto& swapchain = vulkan_state.swapchain;
-    const auto& swapchain_framebuffers = vulkan_state.swapchain_framebuffers;
-    const auto& vs_command_buffers_0 = vulkan_state.command_buffers.at(0);
-    const auto& command_buffer = vs_command_buffers_0.at(0);
-    const auto& render_pass = vulkan_state.render_passes.at(0);
-    const auto& swapchain_extent = vulkan_state.render_info.extent;
-    const auto& pipeline = vulkan_state.pipelines.at(0);
-    const auto& viewport = vulkan_state.viewports.front();
-    const auto& scissor = vulkan_state.scissors.front();
-    const auto& graphics_queue = vulkan_state.graphics_queue;
-    const auto& present_queue = vulkan_state.present_queue;
-    const auto& pipeline_layout = vulkan_state.pipeline_layouts.at(0);
+void DrawFrame(DrawState& draw_state) {
+    auto& vulkan_state = draw_state.vulkan_state;
+    auto& image_available_semaphore = vulkan_state.semaphores.at(0);
+    auto& render_finished_semaphore = vulkan_state.semaphores.at(1);
+    auto& in_flight_fence = vulkan_state.fences.at(0);
+    auto& device = vulkan_state.devices.at(0);
+    auto& swapchain = vulkan_state.swapchain;
+    auto& swapchain_framebuffers = vulkan_state.swapchain_framebuffers;
+    auto& vs_command_buffers_0 = vulkan_state.command_buffers.at(0);
+    auto& command_buffer = vs_command_buffers_0.at(0);
+    auto& render_pass = vulkan_state.render_passes.at(0);
+    auto& target_extent = vulkan_state.render_info.extent;
+    //auto& pipeline = vulkan_state.pipelines.at(0);
+    auto& viewport = vulkan_state.viewports.front();
+    auto& scissor = vulkan_state.scissors.front();
+    auto& graphics_queue = vulkan_state.graphics_queue;
+    auto& present_queue = vulkan_state.present_queue;
+    auto& pipeline_layout = vulkan_state.pipeline_layouts.at(0);
 
     vk::Result result = device.waitForFences({*in_flight_fence}, VK_TRUE, std::numeric_limits<uint64_t>::max());
     device.resetFences({*in_flight_fence});
@@ -398,28 +400,112 @@ void DrawFrame(const DrawState& draw_state) {
     std::tie(result, image_index) = swapchain.acquireNextImage(std::numeric_limits<uint64_t>::max(), *image_available_semaphore);
     assert(result == vk::Result::eSuccess);
     assert(image_index < swapchain_framebuffers.size());
-    vk::ClearValue clear_color{.color={std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f}}};
+
+    jms::vulkan::VertexDescription2EXT vertex_desc = jms::vulkan::VertexDescription2EXT::Create<Vertex>(0);
+    vk::ClearValue clear_value{.color={std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f}}};
+
+    std::vector<vk::RenderingAttachmentInfo> color_attachments{
+        {
+            .imageView=*vulkan_state.swapchain_image_views[image_index],
+            .imageLayout=vk::ImageLayout::eColorAttachmentOptimal,
+            .resolveMode={},
+            .resolveImageView={},
+            .resolveImageLayout={},
+            .loadOp=vk::AttachmentLoadOp::eClear,
+            .storeOp=vk::AttachmentStoreOp::eStore,
+            .clearValue=clear_value
+        }
+    };
+
+    vk::RenderingInfo rendering_info{
+        .flags={},
+        .renderArea={
+            .offset={0, 0},
+            .extent=target_extent
+        },
+        .layerCount=1,
+        .viewMask=0,
+        .colorAttachmentCount=static_cast<uint32_t>(color_attachments.size()),
+        .pColorAttachments=color_attachments.data(),
+        .pDepthAttachment=nullptr,
+        .pStencilAttachment=nullptr
+    };
 
     command_buffer.reset();
     command_buffer.begin({.pInheritanceInfo=nullptr});
-    command_buffer.beginRenderPass({
-        .renderPass=*render_pass,
-        .framebuffer=*swapchain_framebuffers[image_index],
-        .renderArea={
-            .offset={0, 0},
-            .extent=swapchain_extent
-        },
-        .clearValueCount=1,
-        .pClearValues=&clear_color // count + values can be array
-    }, vk::SubpassContents::eInline);
-    command_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, *pipeline);
-    command_buffer.setViewport(0, viewport);
-    command_buffer.setScissor(0, scissor);
+    command_buffer.beginRendering(rendering_info);
+
+    command_buffer.setViewportWithCountEXT({
+        {
+            .x=0.0f,
+            .y=0.0f,
+            .width=static_cast<float>(target_extent.width),
+            .height=static_cast<float>(target_extent.height),
+            .minDepth=0.0f,
+            .maxDepth=1.0f
+        }
+    });
+    command_buffer.setScissorWithCountEXT({{.offset={0, 0}, .extent=target_extent}});
+
+    command_buffer.setPrimitiveTopologyEXT(vk::PrimitiveTopology::eTriangleList);
+    //command_buffer.setPrimitiveRestartEnableEXT(false);
+
+    // multisampling
+    //command_buffer.setRasterizationSamplesEXT(vk::SampleCountFlagBits::e1);
+    //command_buffer.setAlphaToCoverageEnableEXT(false);
+    //command_buffer.setAlphaToOneEnableEXT(false);
+    //command_buffer.setSampleMaskEXT(vk::SampleCountFlagBits::e1, {});
+    //    ...others?  seems like it is missing some settings like minSampleShading
+
+    // rasterization
+    //command_buffer.setRasterizerDiscardEnableEXT(false);
+    //command_buffer.setPolygonModeEXT(vk::PolygonMode::eFill);
+    command_buffer.setCullModeEXT(vk::CullModeFlagBits::eBack);
+    command_buffer.setFrontFaceEXT(vk::FrontFace::eCounterClockwise); //vk::FrontFace::eClockwise  ---- review
+    //command_buffer.setLineWidth(1.0f);
+    //command_buffer.setDepthClampEnableEXT(false);
+    //command_buffer.setDepthBiasEnableEXT(false);
+    //command_buffer.setDepthBias(0.0f, 0.0f, 0.0f);
+
+    // DepthStencilState
+    //command_buffer.setDepthTestEnableEXT(false);
+    //command_buffer.setDepthBoundsTestEnableEXT(false); // VkPipelineDepthStencilStateCreateInfo::depthBoundsTestEnable
+    //command_buffer.setDepthBounds(0.0f, 1.0f); // VkPipelineDepthStencilStateCreateInfo::minDepthBounds/maxDepthBounds
+    //command_buffer.setDepthClipEnableEXT(true); // if not provided then VkPipelineRasterizationDepthClipStateCreateInfoEXT::depthClipEnable or if VkPipelineRasterizationDepthClipStateCreateInfoEXT is not provided then the inverse of setDepthClampEnableEXT
+    //command_buffer.setDepthClipNegativeOneToOneEXT(false);
+    //command_buffer.setDepthWriteEnableEXT(false);
+    //command_buffer.setDepthCompareOpEXT(vk::CompareOp::eNever);
+    //command_buffer.setStencilTestEnableEXT(false);
+
+    // Stencil stuff
+    //command_buffer.setStencilOpEXT({}, {}, {}, {}, {});
+    //command_buffer.setStencilCompareMask({}, {});
+    //command_buffer.setStencilWriteMask({}, {});
+    //command_buffer.setStencilReference({}, {});
+
+    //command_buffer.setFragmentShadingRateKHR({}, {});
+
+    //command_buffer.setLogicOpEnableEXT(false);
+    //command_buffer.setLogicOpEXT(vk::LogicOp::eCopy);
+    /*
+    command_buffer.setColorWriteMaskEXT(0, {
+        {
+            vk::ColorComponentFlagBits::eR |
+            vk::ColorComponentFlagBits::eG |
+            vk::ColorComponentFlagBits::eB |
+            vk::ColorComponentFlagBits::eA
+        }
+    });
+    */
+
+    command_buffer.setVertexInputEXT(vertex_desc.binding_description, vertex_desc.attribute_description);
+
     command_buffer.bindVertexBuffers(0, {draw_state.vertex_buffer}, {0});
     command_buffer.bindIndexBuffer(draw_state.index_buffer, 0, vk::IndexType::eUint32);
+    BindShaders(command_buffer, draw_state.shader_group);
     command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, *pipeline_layout, 0, {*vulkan_state.descriptor_sets[0]}, {});
     command_buffer.drawIndexed(draw_state.num_indices, 1, 0, 0, 0);
-    command_buffer.endRenderPass();
+    command_buffer.endRendering();
     command_buffer.end();
 
     std::vector<vk::Semaphore> wait_semaphores{*image_available_semaphore};
