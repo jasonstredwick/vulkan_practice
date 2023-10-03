@@ -1,13 +1,15 @@
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <format>
 #include <iostream>
+#include <limits>
 #include <memory>
-#include <numbers>
-#include <set>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -21,47 +23,122 @@
 #include "jms/vulkan/memory_resource.hpp"
 #include "jms/vulkan/render_info.hpp"
 #include "jms/vulkan/state.hpp"
+#include "jms/vulkan/types.hpp"
 #include "jms/vulkan/vertex_description.hpp"
 #include "jms/wsi/glfw.hpp"
 #include "jms/wsi/glfw.cpp"
+#include "jms/wsi/surface.hpp"
 
 #include "shader.hpp"
 
 
-constexpr const size_t WIN_WIDTH = 1024;
-constexpr const size_t WIN_HEIGHT = 1024;
+struct AppState {
+    static constexpr size_t WINDOW_WIDTH{1024};
+    static constexpr size_t WINDOW_HEIGHT{1024};
+
+    size_t window_width{WINDOW_WIDTH};
+    size_t window_height{WINDOW_HEIGHT};
+
+    std::string app_name{"VULKAN_APP"};
+    std::string engine_name{"VULKAN_APP_ENGINE"};
+
+    std::vector<std::string> instance_extensions{
+        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME
+    };
+
+    std::vector<std::string> instance_layers{
+        std::string{"VK_LAYER_KHRONOS_synchronization2"},
+        std::string{"VK_LAYER_KHRONOS_shader_object"}
+    };
+
+    std::vector<std::string> device_extensions{
+        VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME,
+        VK_EXT_SHADER_OBJECT_EXTENSION_NAME,
+        VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME,
+        VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME,
+        VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME,
+        VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
+        VK_KHR_MAINTENANCE2_EXTENSION_NAME,
+        VK_KHR_MULTIVIEW_EXTENSION_NAME,
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME
+    };
+
+    std::vector<std::string> device_layers{};
+    vk::PhysicalDeviceFeatures device_features{};
+    std::vector<jms::vulkan::DeviceCreateInfo2Variant> device_pnext_features{
+        vk::PhysicalDeviceShaderObjectFeaturesEXT{.shaderObject=true},
+        vk::PhysicalDeviceDynamicRenderingFeatures{.dynamicRendering=true}
+    };
+
+    uint32_t queue_family_index{0};
+    std::vector<float> queue_priority{1.0f, 1.0f}; // graphics + presentation == equal priority
+
+    jms::vulkan::GraphicsRenderingState default_graphics_rendering_state{
+        .render_area{
+            .extent{
+                .width=static_cast<uint32_t>(WINDOW_WIDTH),
+                .height=static_cast<uint32_t>(WINDOW_HEIGHT)
+            }
+        },
+
+        .viewports={{
+            .width=static_cast<float>(WINDOW_WIDTH),
+            .height=static_cast<float>(WINDOW_HEIGHT)
+        }},
+
+        .scissors={{
+            .extent{
+                .width=static_cast<uint32_t>(WINDOW_WIDTH),
+                .height=static_cast<uint32_t>(WINDOW_HEIGHT)
+            }
+        }}
+    };
+};
 
 
 struct DrawState {
     jms::vulkan::State& vulkan_state;
-    jms::vulkan::shader::ShaderGroup& shader_group;
+    jms::vulkan::GraphicsPass& graphics_pass;
     vk::Buffer vertex_buffer;
     vk::Buffer index_buffer;
     uint32_t num_indices;
-    vk::Viewport viewport;
-    vk::Rect2D scissor;
+    std::vector<vk::DescriptorSet> descriptor_sets{};
 };
 
 
 void DrawFrame(DrawState& draw_state);
-jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State&, jms::wsi::glfw::Environment&);
+jms::vulkan::State CreateEnvironment(const AppState&, std::optional<jms::wsi::glfw::Window*> = std::nullopt);
 
 
 template <typename T> size_t NumBytes(const T& t) noexcept { return t.size() * sizeof(typename T::value_type); }
+template <typename T> size_t NumBytesCap(const T& t) noexcept { return t.capacity() * sizeof(typename T::value_type); }
 
 
 int main(int argc, char** argv) {
     std::cout << std::format("Start\n");
 
     try {
-        jms::vulkan::State vulkan_state{};
+        AppState app_state{};
+
         jms::wsi::glfw::Environment glfw_environment{};
-        jms::wsi::glfw::Window window = CreateEnvironment(vulkan_state, glfw_environment);
+        glfw_environment.EnableHIDPI();
+        auto window = jms::wsi::glfw::Window::DefaultCreate(app_state.window_width, app_state.window_height);
+        std::ranges::transform(jms::wsi::glfw::GetVulkanInstanceExtensions(),
+                               std::back_inserter(app_state.instance_extensions),
+                               [](auto& i) { return i; });
+
+        jms::vulkan::State vulkan_state = CreateEnvironment(app_state, std::addressof(window));
         vk::raii::PhysicalDevice& physical_device = vulkan_state.physical_devices.at(0);
         vk::raii::Device& device = vulkan_state.devices.at(0);
 
-        std::vector<jms::vulkan::shader::Info> shader_info = LoadShaders(device);
-        jms::vulkan::shader::ShaderGroup shader_group = CreateGroup(device, shader_info);
+        jms::vulkan::GraphicsPass graphics_pass{
+            device, app_state.default_graphics_rendering_state, std::move(CreateGroup())};
+        vk::raii::DescriptorPool descriptor_pool = graphics_pass.CreateDescriptorPool(device, 0, 1);
+        vk::raii::DescriptorSets descriptor_sets = graphics_pass.CreateDescriptorSets(device, descriptor_pool, {0});
+        vk::raii::DescriptorSet& descriptor_set = descriptor_sets.at(0);
+        vulkan_state.semaphores.push_back(device.createSemaphore({}));
+        vulkan_state.semaphores.push_back(device.createSemaphore({}));
+        vulkan_state.fences.push_back(device.createFence({.flags=vk::FenceCreateFlagBits::eSignaled}));
 
         jms::vulkan::MemoryHelper memory_helper{physical_device, device};
         auto dyn_memory_type_index = memory_helper.GetDeviceMemoryResourceMappedCapableMemoryType();
@@ -147,87 +224,28 @@ int main(int argc, char** argv) {
         vk::raii::Buffer camera_buffer = dyn_allocator.AsBuffer(
             camera_data.data(), NumBytes(camera_data), vk::BufferUsageFlagBits::eStorageBuffer);
 
+        graphics_pass.UpdateDescriptorSets(
+            device, descriptor_set, 0,
+            {
+                { 0, {.buffer=*vertex_data_buffer, .offset=0, .range=NumBytesCap(vertex_data)} },
+                { 1, {.buffer=*model_data_buffer,  .offset=0, .range=NumBytesCap(model_transform_data)} },
+                { 2, {.buffer=*camera_buffer,      .offset=0, .range=NumBytesCap(camera_data)} }
+            },
+            {},
+            {}
+        );
+
+
         /***
          * Update draw state
          */
-
-        std::vector<vk::DescriptorPoolSize> pool_sizes{
-            {
-                .type=vk::DescriptorType::eStorageBuffer,
-                .descriptorCount=3
-            }
-        };
-        vk::raii::DescriptorPool descriptor_pool = vulkan_state.devices.at(0).createDescriptorPool({
-            .maxSets=1,
-            .poolSizeCount=static_cast<uint32_t>(pool_sizes.size()),
-            .pPoolSizes=pool_sizes.data()
-        });
-        std::vector<vk::DescriptorSetLayout> layouts{};
-        std::ranges::transform(shader_group.layouts, std::back_inserter(layouts), [](auto& dsl) {
-            return *dsl;
-        });
-        vulkan_state.descriptor_sets = vulkan_state.devices.at(0).allocateDescriptorSets({
-            .descriptorPool=*descriptor_pool,
-            .descriptorSetCount=1,
-            .pSetLayouts=layouts.data()
-        });
-
-        vk::DescriptorBufferInfo vertex_data_buffer_info{
-            .buffer=*vertex_data_buffer,
-            .offset=0,
-            .range=NumBytes(vertex_data)
-        };
-        vk::DescriptorBufferInfo model_transform_storage_buffer_info{
-            .buffer=*model_data_buffer,
-            .offset=0,
-            .range=NumBytes(model_transform_data)
-        };
-        vk::DescriptorBufferInfo camera_buffer_info{
-            .buffer=*camera_buffer,
-            .offset=0,
-            .range=NumBytes(camera_data)
-        };
-        vulkan_state.devices.at(0).updateDescriptorSets({{
-            .dstSet=*vulkan_state.descriptor_sets.at(0),
-            .dstBinding=0,
-            .dstArrayElement=0,
-            .descriptorCount=1,
-            .descriptorType=vk::DescriptorType::eStorageBuffer,
-            .pImageInfo=nullptr,
-            .pBufferInfo=&vertex_data_buffer_info,
-            .pTexelBufferView=nullptr
-        }, {
-            .dstSet=*vulkan_state.descriptor_sets.at(0),
-            .dstBinding=1,
-            .dstArrayElement=0,
-            .descriptorCount=1,
-            .descriptorType=vk::DescriptorType::eStorageBuffer,
-            .pImageInfo=nullptr,
-            .pBufferInfo=&model_transform_storage_buffer_info,
-            .pTexelBufferView=nullptr
-        }, {
-            .dstSet=*vulkan_state.descriptor_sets.at(0),
-            .dstBinding=2,
-            .dstArrayElement=0,
-            .descriptorCount=1,
-            .descriptorType=vk::DescriptorType::eStorageBuffer,
-            .pImageInfo=nullptr,
-            .pBufferInfo=&camera_buffer_info,
-            .pTexelBufferView=nullptr
-        }}, {});
-        vulkan_state.pipeline_layouts.push_back(device.createPipelineLayout({
-            .setLayoutCount=static_cast<uint32_t>(layouts.size()),
-            .pSetLayouts=layouts.data(),
-            .pushConstantRangeCount=0,
-            .pPushConstantRanges=nullptr
-        }));
-
         DrawState draw_state{
             .vulkan_state=vulkan_state,
-            .shader_group=shader_group,
+            .graphics_pass=graphics_pass,
             .vertex_buffer=*vertex_buffer,
             .index_buffer=*index_buffer,
-            .num_indices=static_cast<uint32_t>(indices.size())
+            .num_indices=static_cast<uint32_t>(indices.size()),
+            .descriptor_sets={*descriptor_set}
         };
 
         std::cout << std::format("---------------------\n");
@@ -250,13 +268,6 @@ int main(int argc, char** argv) {
             //vertices[0].position.x = delta - 2.0 * delta * (static_cast<float>(ix) / 500.0f);
             //ix = (ix + 1) % 500;
 
-            //const vk::raii::DeviceMemory& device_memory = vulkan_state.device_memory.at(0);
-            //const vk::MemoryRequirements& buffers_mem_reqs = vulkan_state.buffers_mem_reqs.at(0);
-            //void* data = device_memory.mapMemory(0, buffers_mem_reqs.size);
-            //void* data = vulkan_state.mapped_buffers.at(0);
-            //std::memcpy(data, vertices.data(), vertex_buffer_size_in_bytes);
-            //device_memory.unmapMemory();
-
             DrawFrame(draw_state);
             vulkan_state.devices.at(0).waitIdle();
         }
@@ -271,107 +282,47 @@ int main(int argc, char** argv) {
 }
 
 
-jms::wsi::glfw::Window CreateEnvironment(jms::vulkan::State& vulkan_state,
-                                         jms::wsi::glfw::Environment& glfw_environment) {
-    glfw_environment.EnableHIDPI();
+jms::vulkan::State CreateEnvironment(const AppState& app_state, std::optional<jms::wsi::glfw::Window*> window) {
+    jms::vulkan::State vulkan_state{};
 
-    jms::wsi::glfw::Window window = jms::wsi::glfw::Window::DefaultCreate(WIN_WIDTH, WIN_HEIGHT);
-    auto [width, height] = window.DimsPixel();
-    std::cout << std::format("Dims: ({}, {})\n", width, height);
-    std::vector<std::string> window_instance_extensions= jms::wsi::glfw::GetVulkanInstanceExtensions();
-
-    std::vector<std::string> required_instance_extensions{
-        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME
-    };
-    std::set<std::string> instance_extensions_set{window_instance_extensions.begin(),
-                                                  window_instance_extensions.end()};
-    for (auto& i : required_instance_extensions) { instance_extensions_set.insert(i); }
-    std::vector<std::string> instance_extensions{instance_extensions_set.begin(), instance_extensions_set.end()};
-
-    std::vector<std::string> required_layers{
-        std::string{"VK_LAYER_KHRONOS_synchronization2"},
-        std::string{"VK_LAYER_KHRONOS_shader_object"}
-    };
     vulkan_state.InitInstance(jms::vulkan::InstanceConfig{
-        .app_name=std::string{"tut4"},
-        .engine_name=std::string{"tut4.e"},
-        .layer_names=required_layers,
-        .extension_names=instance_extensions
+        .app_name=app_state.app_name,
+        .engine_name=app_state.engine_name,
+        .layer_names=app_state.instance_layers,
+        .extension_names=app_state.instance_extensions
     });
-
-    // Create surface; must happen after instance creation, but before examining/creating devices.
-    // will be moved from
-    vulkan_state.surface = jms::wsi::glfw::CreateSurface(window, vulkan_state.instance);
 
     vk::raii::PhysicalDevice& physical_device = vulkan_state.physical_devices.at(0);
-    vulkan_state.render_info = jms::vulkan::SurfaceInfo(vulkan_state.surface,
-                                                        physical_device,
-                                                        static_cast<uint32_t>(width),
-                                                        static_cast<uint32_t>(height));
-    std::vector<std::string> required_device_extensions{
-        VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME,
-        VK_EXT_SHADER_OBJECT_EXTENSION_NAME,
-        VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME,
-        VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME,
-        VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME,
-        VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
-        VK_KHR_MAINTENANCE2_EXTENSION_NAME,
-        VK_KHR_MULTIVIEW_EXTENSION_NAME,
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME
-    };
-    uint32_t queue_family_index = 0;
-    std::vector<float> queue_priority(2, 1.0f); // graphics + presentation
+
     vulkan_state.InitDevice(physical_device, jms::vulkan::DeviceConfig{
-        .layer_names={},
-        .extension_names=required_device_extensions,
-        .features={},
-        .queue_infos=std::move(std::vector<vk::DeviceQueueCreateInfo>{
-            // graphics queue + presentation queue
-            {
-                .queueFamilyIndex=queue_family_index,
-                .queueCount=static_cast<uint32_t>(queue_priority.size()),
-                .pQueuePriorities=queue_priority.data()
-            }
-        }),
-        .pnext_features{
-            vk::PhysicalDeviceShaderObjectFeaturesEXT{.shaderObject=true},
-            vk::PhysicalDeviceDynamicRenderingFeatures{.dynamicRendering=true}
-        }
+        .layer_names=app_state.device_layers,
+        .extension_names=app_state.device_extensions,
+        .features=app_state.device_features,
+        .queue_family_index=app_state.queue_family_index,
+        .queue_priority=app_state.queue_priority,
+        .pnext_features=app_state.device_pnext_features
     });
-    vulkan_state.InitRenderPass(vulkan_state.devices.at(0), vulkan_state.render_info.format, vulkan_state.render_info.extent);
-#if 0
-    vulkan_state.InitPipeline(vulkan_state.devices.at(0),
-                              vulkan_state.render_passes.at(0),
-                              vulkan_state.render_info.extent,
-                              jms::vulkan::VertexDescription::Create<Vertex>(0),
-                              std::vector<vk::DescriptorSetLayoutBinding>{
-                                  vk::DescriptorSetLayoutBinding{
-                                      .binding=0,
-                                      .descriptorType=vk::DescriptorType::eStorageBuffer,
-                                      .descriptorCount=1,
-                                      .stageFlags=vk::ShaderStageFlagBits::eVertex,
-                                      .pImmutableSamplers=nullptr
-                                  },
-                                  vk::DescriptorSetLayoutBinding{
-                                      .binding=1,
-                                      .descriptorType=vk::DescriptorType::eStorageBuffer,
-                                      .descriptorCount=1,
-                                      .stageFlags=vk::ShaderStageFlagBits::eVertex,
-                                      .pImmutableSamplers=nullptr
-                                  },
-                                  vk::DescriptorSetLayoutBinding{
-                                      .binding=2,
-                                      .descriptorType=vk::DescriptorType::eStorageBuffer,
-                                      .descriptorCount=1,
-                                      .stageFlags=vk::ShaderStageFlagBits::eVertex,
-                                      .pImmutableSamplers=nullptr
-                                  }
-                              },
-                              LoadShaders(vulkan_state.devices.at(0)));
-#endif
-    vulkan_state.InitQueues(vulkan_state.devices.at(0), queue_family_index);
-    vulkan_state.InitSwapchain(vulkan_state.devices.at(0), vulkan_state.render_info, vulkan_state.surface, vulkan_state.render_passes.at(0));
-    return window;
+
+    vulkan_state.InitQueues(0);
+
+    vk::raii::Device& device = vulkan_state.devices.at(0);
+
+    vulkan_state.command_buffers.push_back(device.allocateCommandBuffers({
+        .commandPool=*(vulkan_state.command_pools.at(0)),
+        .level=vk::CommandBufferLevel::ePrimary,
+        .commandBufferCount=1
+    }));
+
+    if (window.has_value()) {
+        vulkan_state.surface = jms::wsi::glfw::CreateSurface(*window.value(), vulkan_state.instance);
+        auto surface_render_info = jms::wsi::FromSurface(vulkan_state.surface,
+                                                         physical_device,
+                                                         static_cast<uint32_t>(app_state.window_width),
+                                                         static_cast<uint32_t>(app_state.window_height));
+        vulkan_state.InitSwapchain(device, vulkan_state.surface, surface_render_info);
+    }
+
+    return vulkan_state;
 }
 
 
@@ -382,130 +333,33 @@ void DrawFrame(DrawState& draw_state) {
     auto& in_flight_fence = vulkan_state.fences.at(0);
     auto& device = vulkan_state.devices.at(0);
     auto& swapchain = vulkan_state.swapchain;
-    auto& swapchain_framebuffers = vulkan_state.swapchain_framebuffers;
     auto& vs_command_buffers_0 = vulkan_state.command_buffers.at(0);
     auto& command_buffer = vs_command_buffers_0.at(0);
-    auto& render_pass = vulkan_state.render_passes.at(0);
-    auto& target_extent = vulkan_state.render_info.extent;
-    //auto& pipeline = vulkan_state.pipelines.at(0);
-    auto& viewport = vulkan_state.viewports.front();
-    auto& scissor = vulkan_state.scissors.front();
     auto& graphics_queue = vulkan_state.graphics_queue;
     auto& present_queue = vulkan_state.present_queue;
-    auto& pipeline_layout = vulkan_state.pipeline_layouts.at(0);
 
     vk::Result result = device.waitForFences({*in_flight_fence}, VK_TRUE, std::numeric_limits<uint64_t>::max());
     device.resetFences({*in_flight_fence});
     uint32_t image_index = 0;
     std::tie(result, image_index) = swapchain.acquireNextImage(std::numeric_limits<uint64_t>::max(), *image_available_semaphore);
     assert(result == vk::Result::eSuccess);
-    assert(image_index < swapchain_framebuffers.size());
-
-    jms::vulkan::VertexDescription2EXT vertex_desc = jms::vulkan::VertexDescription2EXT::Create<Vertex>(0);
-    vk::ClearValue clear_value{.color={std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f}}};
-
-    std::vector<vk::RenderingAttachmentInfo> color_attachments{
-        {
-            .imageView=*vulkan_state.swapchain_image_views[image_index],
-            .imageLayout=vk::ImageLayout::eColorAttachmentOptimal,
-            .resolveMode={},
-            .resolveImageView={},
-            .resolveImageLayout={},
-            .loadOp=vk::AttachmentLoadOp::eClear,
-            .storeOp=vk::AttachmentStoreOp::eStore,
-            .clearValue=clear_value
-        }
-    };
-
-    vk::RenderingInfo rendering_info{
-        .flags={},
-        .renderArea={
-            .offset={0, 0},
-            .extent=target_extent
-        },
-        .layerCount=1,
-        .viewMask=0,
-        .colorAttachmentCount=static_cast<uint32_t>(color_attachments.size()),
-        .pColorAttachments=color_attachments.data(),
-        .pDepthAttachment=nullptr,
-        .pStencilAttachment=nullptr
-    };
+    assert(image_index < vulkan_state.swapchain_image_views.size());
 
     command_buffer.reset();
     command_buffer.begin({.pInheritanceInfo=nullptr});
-    command_buffer.beginRendering(rendering_info);
-
-    command_buffer.setViewportWithCountEXT({
-        {
-            .x=0.0f,
-            .y=0.0f,
-            .width=static_cast<float>(target_extent.width),
-            .height=static_cast<float>(target_extent.height),
-            .minDepth=0.0f,
-            .maxDepth=1.0f
-        }
-    });
-    command_buffer.setScissorWithCountEXT({{.offset={0, 0}, .extent=target_extent}});
-
-    command_buffer.setPrimitiveTopologyEXT(vk::PrimitiveTopology::eTriangleList);
-    //command_buffer.setPrimitiveRestartEnableEXT(false);
-
-    // multisampling
-    //command_buffer.setRasterizationSamplesEXT(vk::SampleCountFlagBits::e1);
-    //command_buffer.setAlphaToCoverageEnableEXT(false);
-    //command_buffer.setAlphaToOneEnableEXT(false);
-    //command_buffer.setSampleMaskEXT(vk::SampleCountFlagBits::e1, {});
-    //    ...others?  seems like it is missing some settings like minSampleShading
-
-    // rasterization
-    //command_buffer.setRasterizerDiscardEnableEXT(false);
-    //command_buffer.setPolygonModeEXT(vk::PolygonMode::eFill);
-    command_buffer.setCullModeEXT(vk::CullModeFlagBits::eBack);
-    command_buffer.setFrontFaceEXT(vk::FrontFace::eCounterClockwise); //vk::FrontFace::eClockwise  ---- review
-    //command_buffer.setLineWidth(1.0f);
-    //command_buffer.setDepthClampEnableEXT(false);
-    //command_buffer.setDepthBiasEnableEXT(false);
-    //command_buffer.setDepthBias(0.0f, 0.0f, 0.0f);
-
-    // DepthStencilState
-    //command_buffer.setDepthTestEnableEXT(false);
-    //command_buffer.setDepthBoundsTestEnableEXT(false); // VkPipelineDepthStencilStateCreateInfo::depthBoundsTestEnable
-    //command_buffer.setDepthBounds(0.0f, 1.0f); // VkPipelineDepthStencilStateCreateInfo::minDepthBounds/maxDepthBounds
-    //command_buffer.setDepthClipEnableEXT(true); // if not provided then VkPipelineRasterizationDepthClipStateCreateInfoEXT::depthClipEnable or if VkPipelineRasterizationDepthClipStateCreateInfoEXT is not provided then the inverse of setDepthClampEnableEXT
-    //command_buffer.setDepthClipNegativeOneToOneEXT(false);
-    //command_buffer.setDepthWriteEnableEXT(false);
-    //command_buffer.setDepthCompareOpEXT(vk::CompareOp::eNever);
-    //command_buffer.setStencilTestEnableEXT(false);
-
-    // Stencil stuff
-    //command_buffer.setStencilOpEXT({}, {}, {}, {}, {});
-    //command_buffer.setStencilCompareMask({}, {});
-    //command_buffer.setStencilWriteMask({}, {});
-    //command_buffer.setStencilReference({}, {});
-
-    //command_buffer.setFragmentShadingRateKHR({}, {});
-
-    //command_buffer.setLogicOpEnableEXT(false);
-    //command_buffer.setLogicOpEXT(vk::LogicOp::eCopy);
-    /*
-    command_buffer.setColorWriteMaskEXT(0, {
-        {
-            vk::ColorComponentFlagBits::eR |
-            vk::ColorComponentFlagBits::eG |
-            vk::ColorComponentFlagBits::eB |
-            vk::ColorComponentFlagBits::eA
-        }
-    });
-    */
-
-    command_buffer.setVertexInputEXT(vertex_desc.binding_description, vertex_desc.attribute_description);
-
-    command_buffer.bindVertexBuffers(0, {draw_state.vertex_buffer}, {0});
-    command_buffer.bindIndexBuffer(draw_state.index_buffer, 0, vk::IndexType::eUint32);
-    BindShaders(command_buffer, draw_state.shader_group);
-    command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, *pipeline_layout, 0, {*vulkan_state.descriptor_sets[0]}, {});
-    command_buffer.drawIndexed(draw_state.num_indices, 1, 0, 0, 0);
-    command_buffer.endRendering();
+    draw_state.graphics_pass.ToCommands(
+        command_buffer,
+        {*vulkan_state.swapchain_image_views.at(image_index)},
+        {},
+        {draw_state.descriptor_sets.at(0)},
+        {},
+        [a=0, b=std::vector<vk::Buffer>{draw_state.vertex_buffer}, c=std::vector<vk::DeviceSize>{0}](auto& cb) {
+            cb.bindVertexBuffers(a, b, c);
+        },
+        [&a=draw_state.index_buffer, b=0, c=vk::IndexType::eUint32](auto& cb) { cb.bindIndexBuffer(a, b, c); },
+        [&a=draw_state.graphics_pass, &F=BindShaders](auto& cb) { F(cb, a); },
+        [&a=draw_state.num_indices, b=1, c=0, d=0, e=0](auto& cb) { cb.drawIndexed(a, b, c, d, e); }
+    );
     command_buffer.end();
 
     std::vector<vk::Semaphore> wait_semaphores{*image_available_semaphore};
