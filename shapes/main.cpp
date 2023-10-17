@@ -71,9 +71,6 @@ struct AppState {
         vk::PhysicalDeviceDynamicRenderingFeatures{.dynamicRendering=true}
     };
 
-    std::vector<std::string> queue_family{"graphics", "presentation"};
-    std::vector<float> queue_priority{1.0f, 1.0f};
-
     std::vector<vk::MemoryPropertyFlags> memory_types{
         vk::MemoryPropertyFlagBits::eDeviceLocal,
         vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
@@ -99,40 +96,6 @@ struct AppState {
             }
         }}
     };
-
-    jms::vulkan::ImageInfo render_target_info{
-        .flags={},
-        .image_type=vk::ImageType::e2D,
-        .format=vk::Format::eR8G8B8A8Unorm,
-        .extent={.width=WINDOW_WIDTH, .height=WINDOW_HEIGHT, .depth=1},
-        .mip_levels=1,
-        .array_layers=1,
-        .samples=vk::SampleCountFlagBits::e1,
-        .tiling=vk::ImageTiling::eOptimal,
-        .usage=(vk::ImageUsageFlagBits::eColorAttachment |
-                vk::ImageUsageFlagBits::eSampled |
-                vk::ImageUsageFlagBits::eTransferSrc),
-        .initial_layout=vk::ImageLayout::eUndefined
-    };
-
-    jms::vulkan::ImageViewInfo render_target_view_info{
-        .flags={},
-        .view_type=vk::ImageViewType::e2D,
-        .format=vk::Format::eR8G8B8A8Unorm,
-        .components={
-            .r = vk::ComponentSwizzle::eIdentity,
-            .g = vk::ComponentSwizzle::eIdentity,
-            .b = vk::ComponentSwizzle::eIdentity,
-            .a = vk::ComponentSwizzle::eIdentity
-        },
-        .subresource={
-            .aspectMask=vk::ImageAspectFlagBits::eColor,
-            .baseMipLevel=0,
-            .levelCount=1,
-            .baseArrayLayer=0,
-            .layerCount=1
-        }
-    };
 };
 
 
@@ -143,14 +106,11 @@ struct DrawState {
     vk::Buffer index_buffer;
     uint32_t num_indices;
     std::vector<vk::DescriptorSet> descriptor_sets{};
-    std::vector<vk::Image> targets{};
-    std::vector<vk::ImageView> target_views{};
-    std::vector<vk::Image> swapchain_images{};
 };
 
 
-void DrawFrame(DrawState& draw_state);
 jms::vulkan::State CreateEnvironment(const AppState&, std::optional<jms::wsi::glfw::Window*> = std::nullopt);
+void DrawFrame(DrawState& draw_state);
 
 
 template <typename T> size_t NumBytes(const T& t) noexcept { return t.size() * sizeof(typename T::value_type); }
@@ -183,25 +143,6 @@ int main(int argc, char** argv) {
         vulkan_state.semaphores.push_back(device.createSemaphore({}));
         vulkan_state.semaphores.push_back(device.createSemaphore({}));
         vulkan_state.fences.push_back(device.createFence({.flags=vk::FenceCreateFlagBits::eSignaled}));
-
-
-
-        using ImageResourceAllocator = jms::vulkan::ImageResourceAllocator<std::vector, jms::NoMutex>;
-        using Image = jms::vulkan::Image<std::vector, jms::NoMutex>;
-
-        auto image_allocator = vulkan_state.memory_helper.CreateImageAllocator(0);
-        std::vector<Image> images{};
-        images.reserve(3);
-        std::ranges::generate_n(std::back_inserter(images), 3, [&a=image_allocator, &b=app_state.render_target_info]() {
-            template <typename T> using Container_t = typename std::remove_cvref_t<decltype(a)>::Container_t<T>;
-            using Mutex_t = typename std::remove_cvref_t<decltype(a)>::Mutex_t;
-            return jms::vulkan::Image<Container_t, Mutex_t>{a, b};
-        });
-
-        std::vector<vk::raii::ImageView> image_views{};
-        image_views.reserve(3);
-        std::ranges::transform(images, std::back_inserter(image_views),
-            [&info=app_state.render_target_view_info](const auto& image) { return image.CreateView(info); });
 
         auto dyn_allocator = vulkan_state.memory_helper.CreateDeviceMemoryResourceMapped(1);
 
@@ -301,11 +242,8 @@ int main(int argc, char** argv) {
             .vertex_buffer=*vertex_buffer,
             .index_buffer=*index_buffer,
             .num_indices=static_cast<uint32_t>(indices.size()),
-            .descriptor_sets=descriptor_sets,
-            .swapchain_images=vulkan_state.swapchain.getImages()
+            .descriptor_sets=descriptor_sets
         };
-        std::ranges::transform(images, std::back_inserter(draw_state.targets), [](auto& i) { return i.AsVkImage(); });
-        std::ranges::transform(image_views, std::back_inserter(draw_state.target_views), [](auto& i) { return *i; });
 
         std::cout << std::format("---------------------\n");
         //std::chrono::time_point<std::chrono::system_clock> t0 = std::chrono::system_clock::now();
@@ -352,17 +290,17 @@ jms::vulkan::State CreateEnvironment(const AppState& app_state, std::optional<jm
     });
 
     vk::raii::PhysicalDevice& physical_device = vulkan_state.physical_devices.at(0);
+    uint32_t queue_family_index = 0;
+    std::vector<float> queue_priority{1.0f, 1.0f};
 
     vulkan_state.InitDevice(physical_device, jms::vulkan::DeviceConfig{
         .layer_names=app_state.device_layers,
         .extension_names=app_state.device_extensions,
         .features=app_state.device_features,
-        .queue_family_index=app_state.queue_family_index,
-        .queue_priority=app_state.queue_priority,
+        .queue_family_index=queue_family_index,
+        .queue_priority=queue_priority,
         .pnext_features=app_state.device_pnext_features
     });
-
-    vulkan_state.InitQueues(0);
 
     vk::raii::Device& device = vulkan_state.devices.at(0);
 
@@ -387,42 +325,6 @@ jms::vulkan::State CreateEnvironment(const AppState& app_state, std::optional<jm
 }
 
 
-class RenderTargets {
-    vk::raii::SwapchainKHR& swapchain;
-    std::vector<vk::raii::ImageView>& targets;
-    std::vector<vk::raii::ImageView>& swapchain_targets;
-    std::vector<vk::raii::ImageView>::iterator target;
-    std::vector<vk::raii::ImageView>::iterator sc_target;
-    std::mutex mutex{};
-
-public:
-    RenderTargets(vk::raii::SwapchainKHR& swapchain_in,
-                  std::vector<vk::raii::ImageView>& targets_in,
-                  std::vector<vk::raii::ImageView>& swapchain_targets)
-    : swapchain{swapchain_in},
-      targets{targets_in},
-      swapchain_targets{swapchain_targets},
-      target{targets.end()},
-      sc_target{targets.end()}
-    {
-        if (targets.size() < 2) { std::runtime_error{"RenderTargets require minimum of two targets."}; }
-    }
-    vk::raii::ImageView& NextTarget() {
-        std::lock_guard lock{mutex};
-        if (target != targets.end()) {
-            target = std::ranges::next(target);
-            if (target == targets.end()) { target = targets.begin(); }
-        } else {
-            target = targets.begin();
-        }
-        if (target == sc_target) {
-            target = std::ranges::next(target);
-            if (target == targets.end()) { target = targets.begin(); }
-        }
-        return *target;
-    }
-};
-
 void DrawFrame(DrawState& draw_state) {
     auto& vulkan_state = draw_state.vulkan_state;
     auto& device = vulkan_state.devices.at(0);
@@ -430,12 +332,13 @@ void DrawFrame(DrawState& draw_state) {
     auto& render_finished_semaphore = vulkan_state.semaphores.at(1);
     auto& present_finished_semaphore = vulkan_state.semaphores.at(2);
     auto& in_flight_fence = vulkan_state.fences.at(0);
-    auto& graphics_queue = vulkan_state.graphics_queue;
-    auto& present_queue = vulkan_state.present_queue;
+    auto& graphics_queue = vulkan_state.graphics_queue.at(0);
+    auto& present_queue = vulkan_state.present_queue.at(0);
     auto& vs_command_buffers_0 = vulkan_state.command_buffers.at(0);
     auto& command_buffer_0 = vs_command_buffers_0.at(0);
     auto& command_buffer_1 = vs_command_buffers_0.at(0);
     auto& swapchain = vulkan_state.swapchain;
+    auto& swapchain_image_views = vulkan_state.swapchain_image_views;
 
     vk::Result result = device.waitForFences({*in_flight_fence}, VK_TRUE, std::numeric_limits<uint64_t>::max());
     device.resetFences({*in_flight_fence});
@@ -444,11 +347,26 @@ void DrawFrame(DrawState& draw_state) {
     std::tie(result, swapchain_image_index) = swapchain.acquireNextImage(std::numeric_limits<uint64_t>::max(),
                                                                          *image_available_semaphore);
     assert(result == vk::Result::eSuccess);
-    assert(swapchain_image_index < draw_state.swapchain_images.size());
+    assert(swapchain_image_index < swapchain_image_views.size());
 
-    vk::ImageView target_view = draw_state.target_views.at(0);
-    vk::Image target_image = draw_state.targets.at(0);
-    vk::Image swapchain_image = draw_state.swapchain_images.at(swapchain_image_index);
+    vk::Image target_image = swapchain.getImages().at(swapchain_image_index);
+    vk::ImageView target_view = *swapchain_image_views.at(swapchain_image_index);
+    vk::ImageMemoryBarrier image_barrier{
+        .srcAccessMask=vk::AccessFlagBits::eColorAttachmentWrite,
+        .dstAccessMask={},
+        .oldLayout=vk::ImageLayout::eUndefined,//vk::ImageLayout::eColorAttachmentOptimal,
+        .newLayout=vk::ImageLayout::ePresentSrcKHR,
+        .srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+        .image=target_image,
+        .subresourceRange=vk::ImageSubresourceRange{
+            .aspectMask=vk::ImageAspectFlagBits::eColor,
+            .baseMipLevel=0,
+            .levelCount=1,
+            .baseArrayLayer=0,
+            .layerCount=1
+        }
+    };
 
     command_buffer_0.reset();
     command_buffer_0.begin({.pInheritanceInfo=nullptr});
@@ -465,13 +383,13 @@ void DrawFrame(DrawState& draw_state) {
         [&a=draw_state.graphics_pass, &F=BindShaders](auto& cb) { F(cb, a); },
         [&a=draw_state.num_indices, b=1, c=0, d=0, e=0](auto& cb) { cb.drawIndexed(a, b, c, d, e); }
     );
+    command_buffer_0.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
+                                     vk::PipelineStageFlagBits::eBottomOfPipe,
+                                     vk::DependencyFlags{},
+                                     {},
+                                     {},
+                                     {image_barrier});
     command_buffer_0.end();
-
-    command_buffer_1.reset();
-    command_buffer_1.begin({.pInheritanceInfo=nullptr});
-    command_buffer_1.copyImage(target_image, vk::ImageLayout::eColorAttachmentOptimal,
-                               swapchain_image, vk::ImageLayout::eColorAttachmentOptimal, {});
-    command_buffer_1.end();
 
     std::vector<vk::Semaphore> wait_semaphores{*image_available_semaphore};
     std::vector<vk::Semaphore> render_semaphores{*render_finished_semaphore};
@@ -486,22 +404,12 @@ void DrawFrame(DrawState& draw_state) {
         .pWaitDstStageMask=dst_stage_mask.data(),
         .commandBufferCount=static_cast<uint32_t>(command_buffers_0.size()),
         .pCommandBuffers=jms::vulkan::VectorAsPtr(command_buffers_0),
-        .signalSemaphoreCount=static_cast<uint32_t>(render_semaphores.size()),
-        .pSignalSemaphores=jms::vulkan::VectorAsPtr(render_semaphores)
-    }}, VK_NULL_HANDLE);
-
-    graphics_queue.submit(std::array<vk::SubmitInfo, 1>{vk::SubmitInfo{
-        .waitSemaphoreCount=static_cast<uint32_t>(render_semaphores.size()),
-        .pWaitSemaphores=jms::vulkan::VectorAsPtr(render_semaphores),
-        .pWaitDstStageMask=jms::vulkan::VectorAsPtr(dst_stage_mask),
-        .commandBufferCount=static_cast<uint32_t>(command_buffers_0.size()),
-        .pCommandBuffers=jms::vulkan::VectorAsPtr(command_buffers_0),
         .signalSemaphoreCount=static_cast<uint32_t>(present_semaphores.size()),
         .pSignalSemaphores=jms::vulkan::VectorAsPtr(present_semaphores)
     }}, *in_flight_fence);
 
     std::vector<vk::SwapchainKHR> swapchains{*swapchain};
-    present_queue.presentKHR({
+    result = present_queue.presentKHR({
         .waitSemaphoreCount=static_cast<uint32_t>(present_semaphores.size()),
         .pWaitSemaphores=jms::vulkan::VectorAsPtr(present_semaphores),
         .swapchainCount=static_cast<uint32_t>(swapchains.size()),
