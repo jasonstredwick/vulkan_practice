@@ -15,8 +15,9 @@
 #include <string>
 #include <vector>
 
+#include "jms/external/glm.hpp"
+#include "jms/graphics/projection.hpp"
 #include "jms/utils/no_mutex.hpp"
-#include "jms/vulkan/glm.hpp"
 #include "jms/vulkan/vulkan.hpp"
 #include "jms/vulkan/camera.hpp"
 #include "jms/vulkan/info.hpp"
@@ -30,6 +31,9 @@
 #include "jms/wsi/surface.hpp"
 
 #include "shader.hpp"
+
+
+#include <glm/gtx/string_cast.hpp>
 
 
 constexpr const size_t WINDOW_WIDTH{1024};
@@ -84,9 +88,20 @@ struct AppState {
             }
         },
 
+        .depth_attachment=vk::RenderingAttachmentInfo{
+            .imageLayout=vk::ImageLayout::eDepthAttachmentOptimal,
+            .loadOp=vk::AttachmentLoadOp::eClear,
+            .storeOp=vk::AttachmentStoreOp::eStore,
+            .clearValue=vk::ClearValue{.depthStencil={.depth=1.0f, .stencil=0}}
+        },
+
         .viewports={{
+            .x=0,
+            .y=0,
             .width=static_cast<float>(WINDOW_WIDTH),
-            .height=static_cast<float>(WINDOW_HEIGHT)
+            .height=static_cast<float>(WINDOW_HEIGHT),
+            .minDepth=0.0f,
+            .maxDepth=1.0f
         }},
 
         .scissors={{
@@ -94,7 +109,12 @@ struct AppState {
                 .width=static_cast<uint32_t>(WINDOW_WIDTH),
                 .height=static_cast<uint32_t>(WINDOW_HEIGHT)
             }
-        }}
+        }},
+
+        .depth_test_enabled=true,
+        .depth_clamp_enabled=true,
+        .depth_compare_op=vk::CompareOp::eLess,
+        .depth_write_enabled=true
     };
 };
 
@@ -106,6 +126,8 @@ struct DrawState {
     vk::Buffer index_buffer;
     uint32_t num_indices;
     std::vector<vk::DescriptorSet> descriptor_sets{};
+    vk::Image depth_image;
+    vk::ImageView depth_image_view;
 };
 
 
@@ -144,6 +166,30 @@ int main(int argc, char** argv) {
         vulkan_state.semaphores.push_back(device.createSemaphore({}));
         vulkan_state.fences.push_back(device.createFence({.flags=vk::FenceCreateFlagBits::eSignaled}));
 
+        uint32_t mti = vulkan_state.memory_helper.GetMemoryTypeIndex(0);
+        auto& tdmr = vulkan_state.memory_helper.GetResource(0);
+        jms::vulkan::ImageResourceAllocator<std::vector, jms::NoMutex> image_allocator{tdmr, mti, device};
+        //auto image_allocator = vulkan_state.memory_helper.CreateImageAllocator(0);
+        jms::vulkan::Image<std::vector, jms::NoMutex> depth_image(image_allocator, jms::vulkan::ImageInfo{
+            .format=vk::Format::eD32Sfloat,
+            .extent={
+                .width=static_cast<uint32_t>(app_state.window_width),
+                .height=static_cast<uint32_t>(app_state.window_height),
+                .depth=1
+            },
+            .usage=vk::ImageUsageFlagBits::eDepthStencilAttachment
+        });
+        vk::raii::ImageView depth_image_view = depth_image.CreateView({
+            .format=vk::Format::eD32Sfloat,
+            .subresource={
+                .aspectMask=vk::ImageAspectFlagBits::eDepth,
+                .baseMipLevel=0,
+                .levelCount=1,
+                .baseArrayLayer=0,
+                .layerCount=1
+            }
+        });
+
         auto dyn_allocator = vulkan_state.memory_helper.CreateDeviceMemoryResourceMapped(1);
 
         std::pmr::vector<Vertex> vertices{{
@@ -151,65 +197,60 @@ int main(int argc, char** argv) {
             {.model_index=0, .position={-5.0f, 0.0f, 0.0f}},
             {.model_index=0, .position={-5.0f, -5.0f, 0.0f}},
 
-            {.model_index=1, .position={ 0.0f,  0.0f, 0.0f}},
-            {.model_index=1, .position={13.0f,  0.0f, 0.0f}},
+            {.model_index=1, .position={ 0.0f, -13.0f, 0.0f}},
+            {.model_index=1, .position={13.0f, -13.0f, 0.0f}},
             {.model_index=1, .position={13.0f, 13.0f, 0.0f}},
-            {.model_index=1, .position={ 0.0f, 13.0f, 0.0f}}
+            {.model_index=1, .position={ 0.0f, 13.0f, 0.0f}},
+
+            {.model_index=1, .position={0.0f, 13.0f, 0.0f}},
+            {.model_index=1, .position={6.5f, 13.0f, 0.0f}},
+            {.model_index=1, .position={6.5f, 13.0f, 6.5f}},
+            {.model_index=1, .position={0.0f, 13.0f, 6.5f}},
+
+            {.model_index=1, .position={0.0f, -13.0f, 0.0f}},
+            {.model_index=1, .position={6.5f, -13.0f, 0.0f}},
+            {.model_index=1, .position={6.5f, -13.0f, 6.5f}},
+            {.model_index=1, .position={0.0f, -13.0f, 6.5f}},
+
+            {.model_index=1, .position={ 0.0f, -13.0f, 6.5f}},
+            {.model_index=1, .position={13.0f, -13.0f, 6.5f}},
+            {.model_index=1, .position={13.0f, 13.0f, 6.5f}},
+            {.model_index=1, .position={ 0.0f, 13.0f, 6.5f}},
         }, &dyn_allocator};
 
-        std::pmr::vector<uint32_t> indices{{0, 2, 1, 3, 5, 4, 3, 6, 5}, &dyn_allocator};
+        std::pmr::vector<uint32_t> indices{{0, 2, 1, 3, 4, 5, 3, 5, 6, 7, 8, 9, 7, 9, 10, 11, 12, 13, 11, 13, 14,15,16,17,15,17,18}, &dyn_allocator};
 
         std::pmr::vector<VertexData> vertex_data{{
             {.color={1.0f, 0.0f, 0.0f, 1.0f}},
             {.color={1.0f, 0.0f, 0.0f, 1.0f}},
             {.color={1.0f, 0.0f, 0.0f, 1.0f}},
 
+            {.color={1.0f, 1.0f, 1.0f, 1.0f}}, // white
             {.color={1.0f, 1.0f, 1.0f, 1.0f}},
             {.color={1.0f, 1.0f, 1.0f, 1.0f}},
             {.color={1.0f, 1.0f, 1.0f, 1.0f}},
-            {.color={1.0f, 1.0f, 1.0f, 1.0f}}
+
+            {.color={0.0f, 1.0f, 0.0f, 1.0f}}, // green
+            {.color={0.0f, 1.0f, 0.0f, 1.0f}},
+            {.color={0.0f, 1.0f, 0.0f, 1.0f}},
+            {.color={0.0f, 1.0f, 0.0f, 1.0f}},
+
+            {.color={0.0f, 1.0f, 1.0f, 1.0f}}, // cyan
+            {.color={0.0f, 1.0f, 1.0f, 1.0f}},
+            {.color={0.0f, 1.0f, 1.0f, 1.0f}},
+            {.color={0.0f, 1.0f, 1.0f, 1.0f}},
+
+            {.color={0.0f, .0f, 1.0f, 1.0f}},
+            {.color={0.0f, .0f, 1.0f, 1.0f}}, // blue
+            {.color={0.0f, .0f, 1.0f, 1.0f}},
+            {.color={0.0f, .0f, 1.0f, 1.0f}}
         }, &dyn_allocator};
 
         std::pmr::vector<ModelData> model_transform_data{{
             ModelData{.transform=glm::mat4{1.0f}},
             ModelData{.transform=glm::mat4{1.0f}}
-            //ModelData{.transform=glm::mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.75, 0, 0, 1)},//glm::mat4{1.0f},
-            //ModelData{.transform=glm::mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -0.25, 0, 0, 1)}//glm::mat4{1.0f}
         }, &dyn_allocator};
-        //model_transform_data = {
-        //    ModelData{.transform=glm::mat4{1.0f}},
-        //    ModelData{.transform=glm::mat4{1.0f}}
-        //};
-
-        /***
-         * World
-         *
-         * Z Y
-         * |/
-         * .--X
-         */
-        glm::mat4 world{1.0f};
-        //jms::vulkan::Camera camera = jms::vulkan::Camera(
-        //    glm::radians(60.0f),
-        //    static_cast<float>(WIN_WIDTH) / static_cast<float>(WIN_HEIGHT),
-        //    0.1f);
-        jms::vulkan::Camera camera = jms::vulkan::Camera{
-            glm::lookAt(glm::vec3{-5.0f, -3.0f, -10.0f}, glm::vec3{0.0f, 0.0f, 0.0f}, glm::vec3{0.0f, -1.0f, 0.0f}),
-            glm::mat4(1.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.5f, 1.0f)//glm::mat4{1.0f}//glm::infinitePerspective(glm::radians(60.0f), static_cast<float>(WIN_WIDTH) / static_cast<float>(WIN_HEIGHT), 0.1f)
-        };
-        //auto obj_allocator = std::pmr::polymorphic_allocator{&dyn_allocator};
-        //jms::vulkan::UniqueMappedResource<jms::vulkan::Camera> camera{
-        //    obj_allocator,
-        //    glm::lookAt(glm::vec3{-5.0f, -3.0f, -10.0f}, glm::vec3{0.0f, 0.0f, 0.0f}, glm::vec3{0.0f, -1.0f, 0.0f}),
-        //    glm::mat4(1.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.5f, 1.0f)//glm::mat4{1.0f}//glm::infinitePerspective(glm::radians(60.0f), static_cast<float>(WIN_WIDTH) / static_cast<float>(WIN_HEIGHT), 0.1f)
-        //};
-        //std::vector<glm::mat4> camera_data = {camera.projection * glm::perspective(glm::radians(45.0f), 1.0f, 0.1f, 100.0f), camera.model_view};
-        glm::mat4 camera_view{1.0f};
-        camera_view = glm::translate(camera_view, glm::vec3(0, 0, -5.0f));
-        glm::mat4 projection = glm::perspective(glm::radians(45.0f), 1.0f, 0.1f, 100.0f);
-        glm::mat4 mvp = projection * camera_view;
-        std::pmr::vector<glm::mat4> camera_data{{mvp}, &dyn_allocator};
-        //std::vector<glm::mat4> camera_data{mvp};
+        std::pmr::vector<glm::mat4> camera_data{{glm::mat4{1.0f}}, &dyn_allocator};
 
         vk::raii::Buffer vertex_buffer = dyn_allocator.AsBuffer(
             vertices.data(), NumBytes(vertices), vk::BufferUsageFlagBits::eVertexBuffer);
@@ -242,19 +283,97 @@ int main(int argc, char** argv) {
             .vertex_buffer=*vertex_buffer,
             .index_buffer=*index_buffer,
             .num_indices=static_cast<uint32_t>(indices.size()),
-            .descriptor_sets=descriptor_sets
+            .descriptor_sets=descriptor_sets,
+            .depth_image=depth_image.AsVkImage(),
+            .depth_image_view=*depth_image_view
         };
+
+        /***
+         * World
+         *
+         * Z Y
+         * |/
+         * .--X
+         */
+        glm::mat4 world{1.0f};
+        glm::mat4 projection = jms::Perspective_RH_ZO(glm::radians(45.0f), 1.0f, 0.01f, 1000.0f);
+        /***
+         * camera view
+         *
+         * Z Y
+         * |/
+         * .--X
+         */
+        // https://johannesugb.github.io/gpu-programming/setting-up-a-proper-vulkan-projection-matrix/
+        glm::mat4 X{{1.0f,  0.0f,  0.0f, 0.0f},
+                    {0.0f,  0.0f, -1.0f, 0.0f},
+                    {0.0f,  1.0f,  0.0f, 0.0f},
+                    {0.0f,  0.0f,  0.0f, 1.0f}};
+        projection = projection * glm::inverse(X);
+        jms::vulkan::Camera camera{projection,
+                                   {4.0f, 0.0f, 3.0f},
+                                   {glm::radians(0.0f), glm::radians(0.0f), glm::radians(0.0f)}};
 
         std::cout << std::format("---------------------\n");
         //std::chrono::time_point<std::chrono::system_clock> t0 = std::chrono::system_clock::now();
         bool not_done = true;
         int ix = 500;
+        if (glfwRawMouseMotionSupported()) {
+            glfwSetInputMode(window.get(), GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
+            glfwSetInputMode(window.get(), GLFW_STICKY_MOUSE_BUTTONS, GLFW_TRUE);
+        }
+        double xpos = 0.0;
+        double ypos = 0.0;
+        glfwGetCursorPos(window.get(), &xpos, &ypos);
+        bool inverse_pitch = false; //true;
+        float move_speed = 0.01;
+        float pitch_speed = 0.01;
+        float yaw_speed = 0.01;
+        float roll_speed = 0.01;
+
         while (not_done) {
             glfwPollEvents();
-            int state = glfwGetKey(window.get(), GLFW_KEY_Q);
-            if (state == GLFW_PRESS) {
+            if (glfwGetKey(window.get(), GLFW_KEY_Q) == GLFW_PRESS) {
                 not_done = false;
+                continue;
             }
+
+            double prev_xpos = xpos;
+            double prev_ypos = ypos;
+            glfwGetCursorPos(window.get(), &xpos, &ypos);
+
+            glm::vec3 pos_delta{0.0f};
+            glm::vec3 rot_delta{0.0f};
+
+            if (glfwRawMouseMotionSupported()) {
+                int lmb_pressed = glfwGetMouseButton(window.get(), GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+                int rmb_pressed = glfwGetMouseButton(window.get(), GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+                if (lmb_pressed || rmb_pressed) {
+                    glfwSetInputMode(window.get(), GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                    float delta_xpos = static_cast<float>(xpos - prev_xpos);
+                    float delta_ypos = static_cast<float>(ypos - prev_ypos);
+                    rot_delta.x += delta_ypos * pitch_speed * (inverse_pitch ? 1.0 : -1.0); // pitch
+                    rot_delta.z += delta_xpos * yaw_speed; // yaw
+                } else {
+                    glfwSetInputMode(window.get(), GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+                }
+            }
+
+            if (glfwGetKey(window.get(), GLFW_KEY_W) == GLFW_PRESS) { pos_delta.y += move_speed; }
+            if (glfwGetKey(window.get(), GLFW_KEY_S) == GLFW_PRESS) { pos_delta.y -= move_speed; }
+            if (glfwGetKey(window.get(), GLFW_KEY_A) == GLFW_PRESS) { pos_delta.x -= move_speed; }
+            if (glfwGetKey(window.get(), GLFW_KEY_D) == GLFW_PRESS) { pos_delta.x += move_speed; }
+            if (glfwGetKey(window.get(), GLFW_KEY_Z) == GLFW_PRESS) { pos_delta.z -= move_speed; }
+            if (glfwGetKey(window.get(), GLFW_KEY_C) == GLFW_PRESS) { pos_delta.z += move_speed; }
+            if (glfwGetKey(window.get(), GLFW_KEY_1) == GLFW_PRESS) { rot_delta.x += glm::radians(pitch_speed); }
+            if (glfwGetKey(window.get(), GLFW_KEY_2) == GLFW_PRESS) { rot_delta.y += glm::radians(roll_speed); }
+            if (glfwGetKey(window.get(), GLFW_KEY_3) == GLFW_PRESS) { rot_delta.z += glm::radians(yaw_speed); }
+            if (glfwGetKey(window.get(), GLFW_KEY_4) == GLFW_PRESS) { rot_delta.x -= glm::radians(pitch_speed); }
+            if (glfwGetKey(window.get(), GLFW_KEY_5) == GLFW_PRESS) { rot_delta.y -= glm::radians(roll_speed); }
+            if (glfwGetKey(window.get(), GLFW_KEY_6) == GLFW_PRESS) { rot_delta.z -= glm::radians(yaw_speed); }
+            camera.Update(pos_delta, rot_delta);
+            camera_data.at(0) = camera.View();
+
             //std::chrono::time_point<std::chrono::system_clock> t1 = std::chrono::system_clock::now();
             //if (std::chrono::duration_cast<std::chrono::seconds>(t1 - t0).count() > 2) {
             //    glfwPollEvents();
@@ -312,6 +431,9 @@ jms::vulkan::State CreateEnvironment(const AppState& app_state, std::optional<jm
 
     vulkan_state.memory_helper = {physical_device, device, app_state.memory_types};
 
+    if (app_state.default_graphics_rendering_state.depth_attachment.has_value()) {
+    }
+
     if (window.has_value()) {
         vulkan_state.surface = jms::wsi::glfw::CreateSurface(*window.value(), vulkan_state.instance);
         auto surface_render_info = jms::wsi::FromSurface(vulkan_state.surface,
@@ -349,12 +471,14 @@ void DrawFrame(DrawState& draw_state) {
     assert(result == vk::Result::eSuccess);
     assert(swapchain_image_index < swapchain_image_views.size());
 
+    vk::Image depth_image = draw_state.depth_image;
+    vk::ImageView depth_image_view = draw_state.depth_image_view;
     vk::Image target_image = swapchain.getImages().at(swapchain_image_index);
     vk::ImageView target_view = *swapchain_image_views.at(swapchain_image_index);
     vk::ImageMemoryBarrier image_barrier{
         .srcAccessMask=vk::AccessFlagBits::eColorAttachmentWrite,
         .dstAccessMask={},
-        .oldLayout=vk::ImageLayout::eUndefined,//vk::ImageLayout::eColorAttachmentOptimal,
+        .oldLayout=vk::ImageLayout::eUndefined,
         .newLayout=vk::ImageLayout::ePresentSrcKHR,
         .srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
@@ -367,13 +491,36 @@ void DrawFrame(DrawState& draw_state) {
             .layerCount=1
         }
     };
+    vk::ImageMemoryBarrier depth_barrier{
+        .srcAccessMask={},
+        .dstAccessMask=vk::AccessFlagBits::eDepthStencilAttachmentWrite,
+        .oldLayout=vk::ImageLayout::eUndefined,
+        .newLayout=vk::ImageLayout::eDepthStencilAttachmentOptimal,
+        .srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+        .image=depth_image,
+        .subresourceRange=vk::ImageSubresourceRange{
+            .aspectMask=vk::ImageAspectFlagBits::eDepth,
+            .baseMipLevel=0,
+            .levelCount=1,
+            .baseArrayLayer=0,
+            .layerCount=1
+        }
+    };
 
     command_buffer_0.reset();
     command_buffer_0.begin({.pInheritanceInfo=nullptr});
+    command_buffer_0.pipelineBarrier(vk::PipelineStageFlagBits::eEarlyFragmentTests | vk::PipelineStageFlagBits::eLateFragmentTests,
+                                     vk::PipelineStageFlagBits::eEarlyFragmentTests | vk::PipelineStageFlagBits::eLateFragmentTests,
+                                     vk::DependencyFlags{},
+                                     {},
+                                     {},
+                                     {depth_barrier});
     draw_state.graphics_pass.ToCommands(
         command_buffer_0,
         {target_view},
         {},
+        depth_image_view,
         draw_state.descriptor_sets,
         {},
         [a=0, b=std::vector<vk::Buffer>{draw_state.vertex_buffer}, c=std::vector<vk::DeviceSize>{0}](auto& cb) {
